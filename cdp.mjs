@@ -1,11 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-// Use only the running local Woodfish renderer endpoint. Never open a port.
-export async function pages() {
-  const state = JSON.parse(await fs.readFile(path.join(process.env.LOCALAPPDATA,'Woodfish','codex-state.json'),'utf8'));
+async function readPages(file,own) {
+  const state = JSON.parse(await fs.readFile(file,'utf8'));
   if (!Number.isInteger(state.port) || state.port < 1 || state.port > 65535) throw Error('Invalid local renderer port');
   const endpoint = new URL('http://127.0.0.1:'+state.port);
+  if(own){
+    if(!Number.isInteger(state.pid)||state.pid<=0||!/^\/devtools\/browser\/[a-f0-9-]+$/.test(state.browserPath))return [];
+    process.kill(state.pid,0);
+    const v=await fetch(new URL('/json/version',endpoint),{signal:AbortSignal.timeout(1500),redirect:'error'});
+    if((await v.json()).webSocketDebuggerUrl!=='ws://'+endpoint.host+state.browserPath)return [];
+  }
   const response = await fetch(new URL('/json/list',endpoint), {signal:AbortSignal.timeout(2000),redirect:'error'});
   const list=await response.json();
   return list.filter(p=>{
@@ -13,6 +18,12 @@ export async function pages() {
     const ws=new URL(p.webSocketDebuggerUrl);
     return ws.protocol==='ws:' && ws.hostname==='127.0.0.1' && ws.port===endpoint.port;
   });
+}
+
+export async function pages(base=process.env.LOCALAPPDATA){
+  const own=await readPages(path.join(base,'CodexCapsule','desktop.json'),true).catch(()=>[]);
+  if(own.length)return own;
+  return readPages(path.join(base,'Woodfish','codex-state.json'),false).catch(()=>[]);
 }
 
 export async function connect(page) {

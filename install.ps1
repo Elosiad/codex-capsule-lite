@@ -3,7 +3,7 @@ $node = (Get-Command node.exe -ErrorAction Stop).Source
 & $node --disable-warning=ExperimentalWarning -e "require('node:sqlite'); if(typeof WebSocket!=='function') process.exit(1)"
 if ($LASTEXITCODE -ne 0) { throw 'Node.js 22.13 or newer with node:sqlite and WebSocket is required.' }
 $dir = Join-Path $env:LOCALAPPDATA 'CodexCapsule'
-$files = @('capsule.mjs','cdp.mjs','metrics.mjs','renderer.js','uninstall.ps1')
+$files = @('capsule.mjs','cdp.mjs','metrics.mjs','content.mjs','tokenizer.cjs','renderer.js','start-codex.ps1','uninstall.ps1')
 foreach ($f in $files) { if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $f))) { throw "Missing $f" } }
 [void][IO.Directory]::CreateDirectory($dir)
 $status = Join-Path $dir 'status.json'
@@ -29,5 +29,12 @@ $shortcut.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
 $shortcut.Arguments = '"' + $launcher + '"'
 $shortcut.WorkingDirectory = $dir
 $shortcut.Save()
+$menuLink = Join-Path ([Environment]::GetFolderPath('Programs')) 'Codex Capsule.lnk'
+$menu = (New-Object -ComObject WScript.Shell).CreateShortcut($menuLink)
+$menu.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$menu.Arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy RemoteSigned -File "' + (Join-Path $dir 'start-codex.ps1') + '"'
+$menu.WorkingDirectory = $dir
+$menu.Description = 'Open Codex with the local Capsule status bar'
+$menu.Save()
 Start-Process -FilePath $node -ArgumentList @('--disable-warning=ExperimentalWarning',('"' + $main + '"')) -WorkingDirectory $dir -WindowStyle Hidden
 Write-Output "Installed Codex Capsule in $dir"

@@ -2,6 +2,8 @@ $ErrorActionPreference='Stop'
 $dir=Join-Path $env:LOCALAPPDATA 'CodexCapsule'
 $link=Join-Path ([Environment]::GetFolderPath('Startup')) 'Codex Capsule.lnk'
 if(Test-Path -LiteralPath $link){Remove-Item -LiteralPath $link}
+$menu=Join-Path ([Environment]::GetFolderPath('Programs')) 'Codex Capsule.lnk'
+if(Test-Path -LiteralPath $menu){Remove-Item -LiteralPath $menu}
 if(!(Test-Path -LiteralPath $dir)){return}
 $status=Join-Path $dir 'status.json'
 $signal=Join-Path $dir 'stop.signal'
@@ -14,7 +16,7 @@ if(Test-Path -LiteralPath $status){
         if(Get-Process -Id $old.pid -ErrorAction SilentlyContinue){throw 'Capsule has not stopped yet.'}
     }
 }
-foreach($f in 'capsule.mjs','cdp.mjs','metrics.mjs','renderer.js','launch.vbs','status.json','stop.signal','uninstall.ps1'){
+foreach($f in 'capsule.mjs','cdp.mjs','metrics.mjs','content.mjs','tokenizer.cjs','renderer.js','launch.vbs','status.json','desktop.json','start-codex.ps1','stop.signal','uninstall.ps1'){
     $file=Join-Path $dir $f
     if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file}
 }

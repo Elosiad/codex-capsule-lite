@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
+import {ContentReader} from './content.mjs';
 
 export const threadId = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const positive = n => Number.isFinite(n) && n > 0;
@@ -105,7 +106,7 @@ export function summarizeRecord(state, rec, id) {
         const windows=[q.primary,q.secondary].filter(w=>Number.isFinite(w?.used_percent)).map(w=>({
           minutes:w.window_minutes,remaining:pct(100-w.used_percent),reset:w.resets_at*1000
         }));
-        if(windows.length)state.quota={plan:q.plan_type,windows,at:Date.parse(rec.timestamp),source:'当前聊天记录'};
+        if(windows.length||q.credits)state.quota={plan:q.plan_type,windows,credits:q.credits,at:Date.parse(rec.timestamp),source:'当前聊天记录'};
       }
       break;
     }
@@ -118,7 +119,12 @@ export function quotaView(sample, now=Date.now()){
     Number.isFinite(w.remaining) && (w.minutes===10080 || (w.minutes===300 && /^plus(?:$|[_ -])/.test(plan)))
   ).map(w=>({...w,remaining:positive(w.reset)&&w.reset<=now?null:pct(w.remaining)}))
    .sort((a,b)=>a.minutes-b.minutes);
-  return {plan,windows,at:sample?.at??null,source:sample?.source??null};
+  const c=sample?.credits,raw=c?.balance,has=c?.has_credits??c?.hasCredits;
+  const printable=(typeof raw==='string'&&raw.trim()!==''&&raw.length<=64)||Number.isFinite(raw);
+  const unit=typeof c?.unit==='string'?c.unit.trim():'';
+  const balance=printable && (has===true || (has==null&&Number(raw)>0)) && c?.unlimited!==true
+    ? [String(raw),unit].filter(Boolean).join(' '):null;
+  return {plan,windows,balance,at:sample?.at??null,source:sample?.source??null};
 }
 
 // Ignore huge image/tool records without ever retaining their contents.
@@ -144,6 +150,7 @@ export class LocalMetrics {
     this.home=path.resolve(home);
     this.appData=appData;
     this.entries=new Map();
+    this.content=new ContentReader();
   }
   async logPath(id){
     const names=(await fs.readdir(this.home)).filter(n=>/^state_\d+\.sqlite$/.test(n))
@@ -191,20 +198,21 @@ export class LocalMetrics {
       const key=createHash('sha256').update(await fs.realpath(this.home)).digest('hex').slice(0,20);
       const raw=JSON.parse(await fs.readFile(path.join(this.appData,'Codex DragonGirl','snapshots.json'),'utf8'));
       const r=raw.readings?.[key],q=r?.quota,b=q?.buckets?.find(b=>b.id==='codex');
-      if(b?.windows?.length && positive(q.capturedAt))
+      if((b?.windows?.length||b?.credits) && positive(q.capturedAt))
         this.snapshotValue={at:q.capturedAt,plan:r.account?.planType||b.plan,source:'龙娘额度快照',
-          windows:b.windows.map(w=>({minutes:w.minutes,remaining:w.remaining,reset:w.resetsAt}))};
+          credits:b.credits,windows:(b.windows||[]).map(w=>({minutes:w.minutes,remaining:w.remaining,reset:w.resetsAt}))};
     }catch{}
     return this.snapshotValue;
   }
-  async read(id){
+  async read(id,wantContent=false){
     let s={};
     try{s=await this.session(id)}catch{this.entries.delete(id)}
     const snapshot=await this.snapshot();
     const q=snapshot&&(!s.quota||snapshot.at>=s.quota.at)?snapshot:s.quota;
     const retry=s.running&&s.turn?await this.retry(id,s):null;
     const failure=s.failure && (!retry||s.failure.at>=retry.at||s.failure.phase==='failed')?s.failure:retry;
-    return {speed:s.speed??null,ttft:s.ttft??null,running:s.running===true,context:s.context??null,quota:quotaView(q),failure};
+    const composition=wantContent?await this.content.get(this.entries.get(id)?.file):null;
+    return {speed:s.speed??null,ttft:s.ttft??null,running:s.running===true,context:s.context??null,composition,quota:quotaView(q),failure};
   }
   async retry(id,s){
     const entry=this.entries.get(id);

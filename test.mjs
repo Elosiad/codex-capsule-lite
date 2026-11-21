@@ -1,7 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import {scanContent} from './content.mjs';
 import {quotaView,summarizeRecord,retryDiagnostic,explainFailure,contextUsage} from './metrics.mjs';
 const windows=[{minutes:300,remaining:42,reset:3000},{minutes:10080,remaining:68,reset:9000}];
+test('balance preserves the reported amount and unit; no credits or unknown amounts stay hidden',()=>{
+  assert.equal(quotaView({credits:{has_credits:true,balance:'35.50'}}).balance,'35.50');
+  assert.equal(quotaView({credits:{hasCredits:true,balance:4,unit:'credits'}}).balance,'4 credits');
+  assert.equal(quotaView({credits:{hasCredits:false,balance:'0'}}).balance,null);
+  assert.equal(quotaView({credits:{has_credits:true,balance:null}}).balance,null);
+});
+test('content counts the last checkpoint, images once and appended records only',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'capsule-content-')),file=path.join(dir,'log.jsonl');
+  const msg=(role,content)=>({type:'message',role,content});
+  const rec=(type,payload)=>JSON.stringify({timestamp:'2026-01-01T00:00:00Z',type,payload})+'\n';
+  const user=msg('user',[{type:'input_text',text:'hello'},{type:'input_image',image_url:'data:image/png;base64,AA=='}]);
+  try{
+    await fs.writeFile(file,rec('response_item',user)+rec('compacted',{replacement_history:[user]})+rec('response_item',{type:'reasoning',encrypted_content:'hidden'}));
+    const a=await scanContent(file);assert.equal(a.stats.images,1);assert.equal(a.stats.text.user,1);assert.equal(a.stats.opaque,1);
+    await fs.appendFile(file,rec('response_item',{type:'function_call_output',output:[{type:'input_text',text:'hello'},{type:'input_file'}]}));
+    const b=await scanContent(file,a);assert.equal(b.stats.images,1);assert.equal(b.stats.text.results,1);assert.equal(b.stats.files,1);
+  }finally{await fs.unlink(file);await fs.rmdir(dir)}
+});
 test('context breakdown is additive and missing fields stay unknown',()=>{
   const u={input_tokens:150000,cached_input_tokens:142500,cache_write_input_tokens:2000,output_tokens:10000,reasoning_output_tokens:4000,total_tokens:160000};
   const get=(v)=>contextUsage({model_context_window:512000,last_token_usage:v});

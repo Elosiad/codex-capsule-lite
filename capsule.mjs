@@ -22,7 +22,7 @@ const clients=new Map();let nextScan=0,lastStatus='',closed=false;
 process.on('SIGTERM',()=>{closed=true});process.on('SIGINT',()=>{closed=true});
 async function report(state){
   if(state===lastStatus)return;
-  await fs.writeFile(status,JSON.stringify({version:'0.1.0',pid:process.pid,state,updatedAt:new Date().toISOString()}));
+  await fs.writeFile(status,JSON.stringify({version:'0.2.0',pid:process.pid,state,updatedAt:new Date().toISOString()}));
   lastStatus=state;
 }
 try{
@@ -45,7 +45,7 @@ try{
         if(id==='install'){await c.evaluate(renderer);id=await c.evaluate(api+'.current()')}
         if(id!=='home'&&!threadId.test(id))continue;
         active=true;
-        const data=await metrics.read(id);
+        const data=await metrics.read(id,await c.evaluate(api+"?.wantsContent?.()===true"));
         await c.evaluate(api+'?.apply('+JSON.stringify(id)+','+JSON.stringify(data)+')');
       }catch{c.close();clients.delete(url)}
     }

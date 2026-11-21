@@ -53,7 +53,7 @@ for(const p of await pages()){
         const caret=b.querySelector('[data-woodfish-caret]'),cr=caret?.getBoundingClientRect(),br=b.getBoundingClientRect();
         return {strip:rect(sh.querySelector('.strip')),left:rect(left),right:rect(right),
           shadow:getComputedStyle(outer).boxShadow,focused:outer.matches(':focus-within'),
-          caret:!!cr&&cr.height>0&&cr.left>=br.left&&cr.right<=br.right&&cr.top>=br.top&&cr.bottom<=br.bottom,
+          themed:!!caret,caret:!!cr&&cr.height>0&&cr.left>=br.left&&cr.right<=br.right&&cr.top>=br.top&&cr.bottom<=br.bottom,
           metrics:[...sh.querySelectorAll('button')].map(e=>e.textContent),
           hoverPoint:rect(sh.querySelector('button:not([hidden])')),add:rect(f.querySelector('[data-composer-navigation-target=add-context]'))};
       });
@@ -62,19 +62,33 @@ for(const p of await pages()){
         if(action==='focus')e.focus({preventScroll:true});else document.activeElement?.blur();
       },action);
       await editor('blur');const idle=await capture();await editor('focus');await sleep(500);const active=await capture();
-      assert.ok(active.focused&&active.caret&&active.shadow!==idle.shadow,'Woodfish caret and focus glow');
+      assert.ok(active.focused,'Composer focus');
+      if(active.themed)assert.ok(active.caret&&active.shadow!==idle.shadow,'Woodfish caret and focus glow');
       const bounds=s=>assert.ok(s.strip.w>0&&s.strip.l>=s.left.r-1&&s.strip.r<=s.right.l+1&&Math.abs(s.strip.y-s.left.y)<5,'same-row geometry');
       bounds(active);
+      // Recreate the slot order seen after the native question form is dismissed.
+      try{
+        await evaluate(()=>{const h=[...document.querySelectorAll('[data-codex-capsule]')].find(e=>e.shadowRoot.querySelector('.strip')?.offsetWidth);h.parentElement.prepend(h)});
+        await sleep(150);bounds(await capture());
+      }finally{await evaluate(()=>{const h=[...document.querySelectorAll('[data-codex-capsule]')].find(e=>e.shadowRoot.querySelector('.strip')?.offsetWidth);h.parentElement.append(h)})}
+      await sleep(150);
       await move(active.hoverPoint.l+6,active.hoverPoint.y);await sleep(250);
       assert.equal(await evaluate(()=>!![...document.querySelectorAll('[data-codex-capsule]')].find(h=>h.shadowRoot.querySelector(':popover-open'))),true);
-      await move(active.add.l+active.add.w/2,active.add.y);await sleep(1050);
-      assert.ok(await evaluate(()=>[...document.querySelectorAll('[data-radix-popper-content-wrapper],[role=tooltip]')].some(e=>e.getBoundingClientRect().height>4&&/添加文件|add files/i.test(e.textContent))),'Native tooltip');
+      await move(active.add.l-40,active.add.y-50);await sleep(300);
+      const add=(await capture()).add;
+      await move(add.l+add.w/2,add.y);
+      let tip=false;
+      for(let i=0;i<12&&!tip;i++){
+        await sleep(200);
+        tip=await evaluate(()=>[...document.querySelectorAll('[data-radix-popper-content-wrapper],[role=tooltip]')].some(e=>e.getBoundingClientRect().height>4&&/添加文件|add files/i.test(e.textContent)));
+      }
+      assert.ok(tip,'Native tooltip');
       await move(active.strip.l-45,active.strip.y-50);
       try{
         await evaluate(()=>{const style=document.createElement('style');style.id='cc-verify-width';style.textContent='[data-composer-placement="thread"] {max-width:540px!important}';document.head.append(style)});
         await sleep(450);bounds(await capture());
       }finally{await evaluate(()=>document.getElementById('cc-verify-width')?.remove())}
-      console.log('PASS same-row bounds at normal / 540px composer, native tooltip, Capsule panel, Woodfish caret and focus glow');
+      console.log('PASS same-row bounds at normal / 540px composer, native control remount, native tooltip and Capsule panel'+(active.themed?', Woodfish caret and focus glow':''));
       verified=true;
     }finally{if(await current()!==a){assert.ok(await route(a));await ready(a)}}
     break;

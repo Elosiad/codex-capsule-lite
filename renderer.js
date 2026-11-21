@@ -8,6 +8,7 @@
   };
   let root,footer,host,shadow,pop,observer,sizing,strip,id='',latest,active='',signature='',sizeMode='',pinned=false,hideTimer;
   const buttons={};
+  let toolbarWatch,layoutFrame=0;
   const number=new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1});
   const num=n=>number.format(n);
   const kilo=n=>n==null?'—':n>0&&n<10?'<0.01K':(n>=1000?num(n/1000):Number((n/1000).toFixed(2)))+'K';
@@ -59,10 +60,11 @@
         ring.style.setProperty('--fill',(left??0)+'%');
         ring.style.setProperty('--ring',left==null?'#89909b':left<=10?'#d77974':left<=25?'#d6a04b':'#62a57c');
         const reset=element('span','countdown',countdown(w.reset));reset.title='重置于 '+clock(w.reset);
-        row.append(element('span','window',w.minutes===300?'5 小时':'每周'),element('span','percent',left==null?'—':num(left)+'%'),ring,reset);
+        row.append(element('span','window',w.minutes===300?'5h额度':'周额度'),element('span','percent',left==null?'—':num(left)+'%'),ring,reset);
         list.append(row);
       }
       pop.append(list);
+      if(q?.balance!=null)pop.append(element('div','balance','余额　'+q.balance));
       pop.append(element('div','stamp',q?.source?planName(q.plan)+' · '+(q.at?'更新于 '+clock(q.at):'更新时间未知'):'等待额度记录'));
       return;
     }
@@ -96,18 +98,26 @@
       pop.append(element('strong','heading cache','缓存命中 '+(c.cacheRate==null?'—':num(c.cacheRate)+'%')));
       const usage=element('div','ctx-usage');
       usage.append(element('b','',num(c.percent)+'% 已用'),element('span','',kilo(c.used)+' / '+kilo(c.max)));
-      const bar=element('div','ctx-bar'),grid=element('div','ctx-grid');
-      const parts=c.split?[
-        ['未命中输入',c.uncached,'#d5a12d'],['缓存读取',c.read,'#508fe3'],
-        ['推理输出',c.reason,'#22ae91'],['其余输出',c.output-c.reason,'#d77d43']
-      ]:[['输入',c.input,'#d5a12d'],['缓存读取',c.read,'#508fe3'],['推理输出',c.reason,'#22ae91'],['总输出',c.output,'#d77d43']];
-      for(const [label,tokens,color] of parts){
-        const col=element('div','ctx-col');col.style.setProperty('--part',color);
-        col.append(element('span','',label),element('b','',kilo(tokens)));grid.append(col);
-        if(c.split&&tokens>0){const piece=element('i','');piece.style.background=color;piece.style.width=(tokens/c.max*100)+'%';bar.append(piece)}
+      const bar=element('div','ctx-bar'),fill=element('i','');fill.style.width=c.percent+'%';bar.append(fill);
+      pop.append(usage,bar,element('div','stamp','最近一次用量记录 · 缓存写入 '+kilo(c.write)));
+      pop.append(element('strong','composition-title','内容构成'));
+      const content=v.composition;
+      if(!content){pop.append(element('div','stat-label','正在读取本地可识别内容…'));return}
+      const labels={user:'用户文字',instructions:'系统与开发者指令',assistant:'助手正文',calls:'工具调用',results:'工具结果',tools:'工具定义',reason:'可见推理摘要',summary:'压缩摘要',other:'其他文字'};
+      const table=element('div','breakdown');
+      const values=Object.entries(content.text).filter(([,n])=>n>0).sort((a,b)=>b[1]-a[1]);
+      const largest=values[0]?.[1]||1;
+      for(const [key,n] of values){
+        const track=element('i','track'),fill=element('i','');fill.style.width=(n/largest*100)+'%';track.append(fill);
+        table.append(element('span','',labels[key]||'其他文字'),track,element('b','',kilo(n)));
       }
-      if(!c.split){const piece=element('i','');piece.style.width=c.percent+'%';piece.style.background='#82a6d9';bar.append(piece)}
-      pop.append(usage,bar,grid,element('div','stamp','最近一次用量记录 · 缓存写入 '+kilo(c.write)));
+      pop.append(table);
+      const media=['图片 '+content.images+' 张'];
+      if(content.files)media.push('文件 '+content.files+' 个');
+      if(content.audio)media.push('音频 '+content.audio+' 段');
+      pop.append(element('div','attachments',media.join(' · ')));
+      const note='文字按 o200k_base 估算；图片按条目计数。';
+      pop.append(element('div','stat-label',note+(content.opaque?'加密部分未计入。':'')+(content.partial||content.unknown?'仅含可识别记录。':'')));
       return;
     }
   }
@@ -135,7 +145,9 @@
     const short=sizeMode!=='full';
     buttons.speed.textContent=(s?num(s.tps):'—')+(short?' t/s · ':' tok/s · 首字 ')+(t!=null?num(t/1000)+'s':'—');
     buttons.context.textContent=(short?'窗 ':'上下文 ')+(c?num(c.percent)+'%':'—');
-    buttons.quota.textContent=w.length?w.map(a=>(a.minutes===300?'5h ':'周 ')+(a.remaining==null?'—':num(a.remaining)+'%')).join(' · '):'额度 —';
+    const quotaLabels=w.map(a=>(a.minutes===300?'5h额度 ':'周额度 ')+(a.remaining==null?'—':num(a.remaining)+'%'));
+    if(value?.quota?.balance!=null)quotaLabels.push('余额 '+value.quota.balance);
+    buttons.quota.textContent=quotaLabels.join(' · ')||'额度 —';
     buttons.speed.style.setProperty('--ink',!s?'#94989d':s.tps>=25?'#56b986':s.tps>=10?'#dfab4a':'#de786a');
     buttons.speed.toggleAttribute('data-live',!!value?.running&&!!s);
     buttons.context.style.setProperty('--used',(c?.percent||0)+'%');
@@ -144,18 +156,30 @@
   }
   function fit(){
     if(!host?.isConnected)return;
-    const x=host.getBoundingClientRect().left;
+    const anchor=host.getBoundingClientRect();
+    const leading=footer.querySelector('[data-composer-leading-controls]');
     const trailing=footer.querySelector('[data-composer-trailing-controls]');
-    const controls=[...(trailing?.querySelectorAll('button,[role="button"],[tabindex]')||[])]
-      .filter(alive).map(e=>e.getBoundingClientRect().left);
-    const right=Math.min(footer.getBoundingClientRect().right,...controls);
-    const space=Math.max(0,Math.floor(right-x-7));
+    const rects=group=>[...(group?.querySelectorAll('button,[role="button"],[tabindex],[data-composer-navigation-target]')||[])]
+      .filter(e=>alive(e)&&getComputedStyle(e).visibility==='visible').map(e=>e.getBoundingClientRect());
+    const leftRects=rects(leading),rightRects=rects(trailing);
+    if(!leftRects.length||!rightRects.length){strip.style.visibility='hidden';closeDetail();return}
+    const box=footer.getBoundingClientRect();
+    const start=Math.max(box.left,...leftRects.map(r=>r.right))+4;
+    const end=Math.min(box.right,...rightRects.map(r=>r.left))-4;
+    const space=Math.max(0,Math.floor(end-start));
+    // React can insert both native buttons after our host when a question closes.
+    // Anchor to the buttons themselves, independently of the order of siblings.
+    strip.style.left=(start-anchor.left)+'px';
+    strip.style.top=(leftRects[0].top+leftRects[0].height/2-anchor.top)+'px';
     strip.style.maxWidth=space+'px';
+    strip.style.visibility=space>=26?'visible':'hidden';
     const mode=space>=277?'full':space>=178?'short':'scroll';
     if(mode!==sizeMode){sizeMode=mode;draw(latest)}
+    if(active)place();
   }
+  function scheduleFit(){if(!layoutFrame)layoutFrame=requestAnimationFrame(()=>{layoutFrame=0;fit()})}
   function mount(f){
-    closeDetail();sizing?.disconnect();host?.remove();
+    closeDetail();sizing?.disconnect();toolbarWatch?.disconnect();host?.remove();
     footer=f;root=f.closest('[data-composer-placement]');
     host=document.createElement('div');host.dataset.codexCapsule='';
     host.style.cssText='position:relative;display:block;align-self:center;flex:0 0 0;width:0;height:0;min-width:0;box-sizing:border-box';
@@ -187,9 +211,13 @@
       .speed-stat{border-inline-start:2px solid var(--part);padding-inline-start:7px}
       .stat-label,.unit{font-size:11px;opacity:.76}.speed-value{display:flex;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums;white-space:nowrap}
       .speed-value b{font-size:18px;line-height:1.35;font-weight:650}.panel-title{margin-bottom:8px}
+      [popover]{max-height:calc(100vh - 35px);overflow-y:auto}
+      .composition-title{display:block;margin:10px 0 5px;font-size:13px}.breakdown{display:grid;grid-template-columns:max-content minmax(42px,1fr) max-content;align-items:center;gap:3px 8px;font-size:11px}.breakdown b{text-align:end;font-variant-numeric:tabular-nums}
+      .track{background:color-mix(in srgb,currentColor 10%,transparent);border-radius:4px}.track i{display:block;height:4px;border-radius:4px;background:#88a9df}
+      .attachments,.balance{margin:5px 0;font-size:12px}
       .ctx-usage{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}.ctx-usage span{opacity:.8}
       .ctx-bar{display:flex;overflow:hidden;height:5px;border-radius:5px;background:color-mix(in srgb,currentColor 12%,transparent);margin:8px 0 10px}
-      .ctx-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}.ctx-col{border-inline-start:2px solid var(--part);padding-inline-start:5px;display:grid;font-size:11px;white-space:nowrap}.ctx-col b{font-variant-numeric:tabular-nums;font-size:12px}
+      .ctx-bar i{background:#82a6d9}
     `;
     strip=document.createElement('div');strip.className='strip';strip.setAttribute('role','group');strip.setAttribute('aria-label','Codex Capsule');
     for(const [k,label] of Object.entries(panels)){
@@ -206,12 +234,16 @@
     shadow.append(style,strip,pop);leading.append(host);id='';signature='';draw(null);
     sizing=new ResizeObserver(fit);sizing.observe(f);sizing.observe(leading);
     const trailing=f.querySelector('[data-composer-trailing-controls]');if(trailing)sizing.observe(trailing);
+    toolbarWatch=new MutationObserver(scheduleFit);
+    for(const group of [leading.parentElement,trailing])if(group)toolbarWatch.observe(group,{
+      subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden']
+    });
     fit();
   }
   function sync(){
     if(!alive(footer)||!host?.isConnected){
       const f=[...document.querySelectorAll(':is([data-composer-placement="thread"],[data-composer-placement="home"]) [data-composer-footer-responsive]')].find(alive);
-      if(!f){sizing?.disconnect();closeDetail();host?.remove();host=null;root=null;footer=null;id='';return ''}
+      if(!f){sizing?.disconnect();toolbarWatch?.disconnect();closeDetail();host?.remove();host=null;root=null;footer=null;id='';return ''}
       mount(f);
     }
     const next=identity();
@@ -230,6 +262,7 @@
   window.addEventListener('resize',reposition);
   window.addEventListener('scroll',reposition,true);
   window[key]={
+    wantsContent(){return active==='context'&&pop?.matches(':popover-open')},
     current(){if(document.hidden)return null;return sync()},
     apply(expected,value){
       if(!expected||sync()!==expected)return false;
@@ -243,7 +276,7 @@
       return true;
     },
     dispose(){observer.disconnect();window.removeEventListener('resize',reposition);window.removeEventListener('scroll',reposition,true);
-      sizing?.disconnect();closeDetail();host?.remove();delete window[key]}
+      sizing?.disconnect();toolbarWatch?.disconnect();cancelAnimationFrame(layoutFrame);closeDetail();host?.remove();delete window[key]}
   };
   return true;
 })();
