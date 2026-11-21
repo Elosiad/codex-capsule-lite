@@ -5,7 +5,7 @@ import net from 'node:net';
 import {createHash} from 'node:crypto';
 import {setTimeout as sleep} from 'node:timers/promises';
 import {pages,connect} from './cdp.mjs';
-import {LocalMetrics,threadId} from './metrics.mjs';
+import {LocalMetrics,threadId,StreamRate} from './metrics.mjs';
 
 const dir=path.join(process.env.LOCALAPPDATA,'CodexCapsule');
 await fs.mkdir(dir,{recursive:true});
@@ -38,19 +38,27 @@ try{
       }
       nextScan=Date.now()+5000;
     }
-    let active=false;
+    let active=false;const cycle=performance.now();
     for(const [url,c] of clients){
       try{
         let id=await c.evaluate(`document.hidden?null:(${api}?${api}.current():(document.querySelector('[data-composer-placement]')?'install':null))`);
         if(id==='install'){await c.evaluate(renderer);id=await c.evaluate(api+'.current()')}
-        if(id!=='home'&&!threadId.test(id))continue;
+        if(id!=='home'&&!threadId.test(id)){c.streamRate?.sample(null);continue}
         active=true;
         const data=await metrics.read(id,await c.evaluate(api+"?.wantsContent?.()===true"));
+        c.streamRate??=new StreamRate();
+        const sample=data.running&&data.turn?await c.evaluate(api+'?.streamSample?.('+[id,data.turn,data.finishedItem,data.sentAt].map(x=>JSON.stringify(x)).join(',')+')'):null;
+        if(data.running&&data.ttft==null&&data.sentAt){
+          const wait=await c.evaluate(api+'?.observedWait?.('+JSON.stringify(id)+','+JSON.stringify(data.turn)+')');
+          if(Number.isFinite(wait)){data.ttft=wait;data.ttftSource='screen'}
+        }
+        const live=c.streamRate.sample(sample);
+        if(live)data.speed=live;
         await c.evaluate(api+'?.apply('+JSON.stringify(id)+','+JSON.stringify(data)+')');
       }catch{c.close();clients.delete(url)}
     }
     await report(active?'active':'waiting');
-    await sleep(active?1200:3500);
+    await sleep(active?Math.max(100,1000-(performance.now()-cycle)):3500);
   }
 }finally{
   for(const c of clients.values()){await c.evaluate(api+'?.dispose()').catch(()=>{});c.close()}

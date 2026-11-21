@@ -3,6 +3,28 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
 import {ContentReader} from './content.mjs';
+import {createRequire} from 'node:module';
+const require=createRequire(import.meta.url);
+
+// One sampler per renderer. Tokenize only newly rendered text; discard each
+// window immediately after counting, including on navigation or loss of focus.
+export class StreamRate {
+  sample(s){
+    if(!s || s.reset || this.key!==s.key || s.at-this.lastAt>2800 || s.at<this.lastAt){
+      this.key=s?.key;this.start=s?.at;this.lastAt=s?.at;this.pending='';this.rate=null;
+      return null;
+    }
+    this.lastAt=s.at;
+    this.pending+=s.delta;
+    const elapsed=s.at-this.start;
+    if(elapsed>=2950){
+      const tokens=this.pending?require('./tokenizer.cjs').countTokens(this.pending,{disallowedSpecial:new Set()}):0;
+      this.rate=tokens?{tps:tokens*1000/elapsed,tokens,ms:elapsed,live:true}:null;
+      this.start=s.at;this.pending='';
+    }
+    return this.rate;
+  }
+}
 
 export const threadId = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const positive = n => Number.isFinite(n) && n > 0;
@@ -68,7 +90,9 @@ export function summarizeRecord(state, rec, id) {
     case 'task_started':
       state.turn=e.turn_id;
       state.speed=null;
+      state.finishedItem=null;
       state.ttft=null;
+      state.ttftSource=null;state.sentAt=null;state.firstTextSeen=false;
       state.running=true;
       state.startedAt=at;state.progressAt=0;state.failure=null;
       break;
@@ -84,14 +108,29 @@ export function summarizeRecord(state, rec, id) {
       if(state.turn && e.turn_id && state.turn!==e.turn_id)return;
       state.running=false;
       if(state.failure?.phase==='retry'||(state.failure?.at&&state.progressAt>state.failure.at))state.failure=null;
-      state.ttft=positive(e.time_to_first_token_ms)?e.time_to_first_token_ms:null;
+      if(state.ttft==null&&positive(e.time_to_first_token_ms)){
+        state.ttft=e.time_to_first_token_ms;state.ttftSource='official';
+      }
       break;
     case 'turn_aborted':
       if(!state.turn||!e.turn_id||state.turn===e.turn_id){state.running=false;state.failure=null}
       break;
     case 'item_completed': {
-      if(e.item?.type!=='AgentMessage'||(state.turn&&e.turn_id&&e.turn_id!==state.turn))return;
+      if(state.turn&&e.turn_id&&e.turn_id!==state.turn)return;
+      if(e.item?.type==='UserMessage'){
+        if(state.turn&&state.running&&!state.sentAt&&!state.firstTextSeen&&positive(e.started_at_ms))state.sentAt=e.started_at_ms;
+        return;
+      }
+      if(e.item?.type!=='AgentMessage')return;
+      const hasText=positive(e.content_token_count)||e.item.content?.some?.(p=>typeof p?.text==='string'&&p.text.trim());
+      if(hasText&&!state.firstTextSeen){
+        state.firstTextSeen=true;
+        if(positive(state.sentAt)&&e.started_at_ms>=state.sentAt && e.started_at_ms<=e.completed_at_ms){
+          state.ttft=e.started_at_ms-state.sentAt;state.ttftSource='message';
+        }
+      }
       state.progressAt=Math.max(state.progressAt||0,at);
+      state.finishedItem=e.item.id??null;
       if(state.failure?.phase==='retry')state.failure=null;
       const ms=e.completed_at_ms-e.started_at_ms;
       state.speed=positive(e.started_at_ms)&&positive(ms)&&positive(e.content_token_count)
@@ -212,7 +251,7 @@ export class LocalMetrics {
     const retry=s.running&&s.turn?await this.retry(id,s):null;
     const failure=s.failure && (!retry||s.failure.at>=retry.at||s.failure.phase==='failed')?s.failure:retry;
     const composition=wantContent?await this.content.get(this.entries.get(id)?.file):null;
-    return {speed:s.speed??null,ttft:s.ttft??null,running:s.running===true,context:s.context??null,composition,quota:quotaView(q),failure};
+    return {speed:s.speed??null,turn:s.turn??null,sentAt:s.sentAt??null,finishedItem:s.finishedItem??null,ttft:s.ttft??null,ttftSource:s.ttftSource??null,running:s.running===true,context:s.context??null,composition,quota:quotaView(q),failure};
   }
   async retry(id,s){
     const entry=this.entries.get(id);

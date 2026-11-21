@@ -8,6 +8,36 @@
   };
   let root,footer,host,shadow,pop,observer,sizing,strip,id='',latest,active='',signature='',sizeMode='',pinned=false,hideTimer;
   const buttons={};
+  let observed=null;
+  let firstWatch=null;
+  function streamSample(expected,turn,finished,sentAt){
+    if(document.hidden||sync()!==expected||!turn){observed=null;firstWatch=null;return null}
+    const scope=root?.closest('[data-app-action-timeline-scroll]')||root?.closest('main');
+    const selector='[data-response-update-thread="'+CSS.escape(expected)+'"][data-response-update-turn="'+CSS.escape(turn)+'"][data-response-update-item]';
+    const block=scope?.querySelectorAll(selector);
+    const last=block?.[block.length-1];
+    const item=last?.dataset.responseUpdateItem;
+    const body=last?.querySelector('[data-markdown-text-style="assistant-message"]');
+    const now=Date.now(),turnKey=expected+'/'+turn;
+    if(firstWatch?.key!==turnKey){
+      firstWatch={key:turnKey,last:now,armed:false,wait:null};
+      firstWatch.armed=!!sentAt&&!finished&&!body?.textContent?.trim()&&now>=sentAt&&now-sentAt<=2300;
+    }
+    if(now-firstWatch.last>2500)firstWatch.armed=false;
+    firstWatch.last=now;
+    if(firstWatch.armed&&sentAt&&body?.textContent?.trim()){
+      firstWatch.wait=Math.max(0,now-sentAt);firstWatch.armed=false;
+    }
+    if(!item||item===finished||!body?.getClientRects().length){observed=null;return null}
+    const key=expected+'/'+turn+'/'+item, text=body.textContent||'',at=performance.now();
+    const prev=observed;
+    observed={key,length:text.length,tail:text.slice(-96)};
+    // Baseline on first sight, virtualized history, a rewritten Markdown prefix
+    // or a huge pasted block; these do not measure a streaming interval.
+    if(prev?.key!==key||text.length<prev.length||text.length-prev.length>16384||
+       text.slice(Math.max(0,prev.length-96),prev.length)!==prev.tail)return {key,at,reset:true};
+    return {key,at,delta:text.slice(prev.length)};
+  }
   let toolbarWatch,layoutFrame=0;
   const number=new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1});
   const num=n=>number.format(n);
@@ -79,8 +109,8 @@
       pop.append(element('strong','heading panel-title',panels.speed));
       const grid=element('div','speed-grid');
       const measures=[
-        ['生成速度',s?num(s.tps):'—',s?'tok/s':'',buttons.speed.style.getPropertyValue('--ink')],
-        ['首字等待',v.ttft!=null?num(v.ttft/1000):'—',v.ttft!=null?'秒':'','#88a9df']
+        [s?.live?'近 3 秒速度':'片段平均速度',s?(s.live?'≈':'')+num(s.tps):'—',s?'tokens/秒':'',buttons.speed.style.getPropertyValue('--ink')],
+        [v.ttftSource==='official'?'官方首 Token':'首字等待',v.ttft!=null?(v.ttftSource==='screen'?'≈':'')+num(v.ttft/1000):'—',v.ttft!=null?'秒':'','#88a9df']
       ];
       for(const [label,amount,unit,color] of measures){
         const col=element('div','speed-stat'),value=element('div','speed-value');
@@ -88,10 +118,15 @@
         value.append(element('b','',amount));
         if(unit)value.append(element('span','unit',unit));
         col.append(element('span','stat-label',label),value);
-        if(label==='首字等待'&&v.ttft==null)col.title=v.running?'本轮结束后统计':'暂无记录';
+        if(color==='#88a9df')col.title=v.ttftSource==='message'?'用户消息时间 → 首条助手正文的日志起始时间':
+          v.ttftSource==='screen'?'用户消息时间 → 本机首次采样到正文':v.ttftSource==='official'?'缺少正文时间，采用 Codex 轮次首 Token 记录':'等待首条正文的时间记录';
         grid.append(col);
       }
-      pop.append(grid,element('div','stamp',s?'最近正文片段 · '+num(s.tokens)+' tokens / '+num(s.ms/1000)+' 秒':'等待可计时的正文片段'));
+      const caption=s?.live?'采样 '+num(s.ms/1000)+' 秒 · 约 '+num(s.tokens)+' tokens':
+        s?'本段 '+num(s.tokens)+' tokens · 耗时 '+num(s.ms/1000)+' 秒 · '+num(s.tps)+' tokens/秒':'等待可计时的正文片段';
+      pop.append(grid,element('div','stamp',caption));
+      if(v.ttftSource==='message')pop.append(element('div','stat-label','首字按消息发出至首段正文开始计算'));
+      if(v.ttftSource==='screen')pop.append(element('div','stat-label','首字来自界面采样，等待日志校准'));
       return;
     }else if(active==='context'){
       if(!c){pop.append(element('strong','heading',panels.context),element('div','stamp','等待本聊天的用量记录'));return}
@@ -143,13 +178,13 @@
       buttons.error.dataset.phase=value.failure.phase;
     }else if(active==='error')closeDetail();
     const short=sizeMode!=='full';
-    buttons.speed.textContent=(s?num(s.tps):'—')+(short?' t/s · ':' tok/s · 首字 ')+(t!=null?num(t/1000)+'s':'—');
+    buttons.speed.textContent=(s?(s.live?'≈':'')+num(s.tps):'—')+(short?' tokens/秒 · ':' tokens/秒 · 首字 ')+(t!=null?(value.ttftSource==='screen'?'≈':'')+num(t/1000)+'s':'—');
     buttons.context.textContent=(short?'窗 ':'上下文 ')+(c?num(c.percent)+'%':'—');
     const quotaLabels=w.map(a=>(a.minutes===300?'5h额度 ':'周额度 ')+(a.remaining==null?'—':num(a.remaining)+'%'));
     if(value?.quota?.balance!=null)quotaLabels.push('余额 '+value.quota.balance);
     buttons.quota.textContent=quotaLabels.join(' · ')||'额度 —';
     buttons.speed.style.setProperty('--ink',!s?'#94989d':s.tps>=25?'#56b986':s.tps>=10?'#dfab4a':'#de786a');
-    buttons.speed.toggleAttribute('data-live',!!value?.running&&!!s);
+    buttons.speed.toggleAttribute('data-live',!!s?.live);
     buttons.context.style.setProperty('--used',(c?.percent||0)+'%');
     buttons.context.style.setProperty('--ink',c?.percent>=90?'#de786a':c?.percent>=75?'#dfab4a':'#88a9df');
     if(active){detail();place()}
@@ -262,6 +297,8 @@
   window.addEventListener('resize',reposition);
   window.addEventListener('scroll',reposition,true);
   window[key]={
+    streamSample,
+    observedWait(expected,turn){return sync()===expected&&firstWatch?.key===expected+'/'+turn?firstWatch.wait:null},
     wantsContent(){return active==='context'&&pop?.matches(':popover-open')},
     current(){if(document.hidden)return null;return sync()},
     apply(expected,value){

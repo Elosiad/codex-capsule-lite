@@ -4,8 +4,30 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {scanContent} from './content.mjs';
-import {quotaView,summarizeRecord,retryDiagnostic,explainFailure,contextUsage} from './metrics.mjs';
+import {quotaView,summarizeRecord,retryDiagnostic,explainFailure,contextUsage,StreamRate} from './metrics.mjs';
 const windows=[{minutes:300,remaining:42,reset:3000},{minutes:10080,remaining:68,reset:9000}];
+test('first commentary counts, tool and reasoning events do not; later messages cannot replace it',()=>{
+  const s={},send=(type,payload={})=>summarizeRecord(s,{type:'event_msg',payload:{type,turn_id:'t',...payload}},'A');
+  const item=(type,at,extra={})=>send('item_completed',{started_at_ms:at,completed_at_ms:at+100,item:{type,...extra}});
+  send('task_started');item('UserMessage',1000);item('Reasoning',1500);item('CommandExecution',1800);
+  item('AgentMessage',2200,{content:[]});assert.equal(s.ttft,null);
+  item('AgentMessage',4655,{phase:'commentary',content:[{text:'我来查一下'}]});assert.equal(s.ttft,3655);assert.equal(s.ttftSource,'message');
+  item('UserMessage',6000);item('AgentMessage',7000,{phase:'final',content:[{text:'好了'}]});
+  send('task_complete',{time_to_first_token_ms:3751});assert.equal(s.ttft,3655);
+  send('task_started',{turn_id:'next'});assert.equal(s.ttft,null);
+});
+test('live speed uses timed additions, clears on idle and resets on item/turn changes',()=>{
+  const rate=new StreamRate();
+  const tick=(at,delta='',key='thread/turn/item')=>rate.sample({at,delta,key});
+  assert.equal(tick(0,'historical text'),null);
+  assert.equal(tick(1000,'hello'),null);tick(2000,' world');
+  const first=tick(3000,'!');
+  assert.equal(first.live,true);assert.equal(first.tokens,3);assert.equal(first.tps,1);
+  tick(4000);tick(5000);assert.equal(tick(6000),null);
+  tick(7000,'resume');assert.equal(tick(8000,'old','threadB/turn/item'),null);
+  assert.equal(rate.sample(null),null);assert.equal(tick(9000,'history'),null);
+  assert.equal(tick(14000,'after suspend'),null);
+});
 test('balance preserves the reported amount and unit; no credits or unknown amounts stay hidden',()=>{
   assert.equal(quotaView({credits:{has_credits:true,balance:'35.50'}}).balance,'35.50');
   assert.equal(quotaView({credits:{hasCredits:true,balance:4,unit:'credits'}}).balance,'4 credits');
