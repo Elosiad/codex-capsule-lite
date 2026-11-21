@@ -99,7 +99,7 @@
       const usage=element('div','ctx-usage');
       usage.append(element('b','',num(c.percent)+'% 已用'),element('span','',kilo(c.used)+' / '+kilo(c.max)));
       const bar=element('div','ctx-bar'),fill=element('i','');fill.style.width=c.percent+'%';bar.append(fill);
-      pop.append(usage,bar,element('div','stamp','最近一次用量记录 · 缓存写入 '+kilo(c.write)));
+      pop.append(usage,bar);
       pop.append(element('strong','composition-title','内容构成'));
       const content=v.composition;
       if(!content){pop.append(element('div','stat-label','正在读取本地可识别内容…'));return}
