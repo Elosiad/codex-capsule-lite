@@ -55,7 +55,7 @@ for(const p of await pages()){
           shadow:getComputedStyle(outer).boxShadow,focused:outer.matches(':focus-within'),
           caret:!!cr&&cr.height>0&&cr.left>=br.left&&cr.right<=br.right&&cr.top>=br.top&&cr.bottom<=br.bottom,
           metrics:[...sh.querySelectorAll('button')].map(e=>e.textContent),
-          hoverPoint:rect(sh.querySelector('button')),add:rect(f.querySelector('[data-composer-navigation-target=add-context]'))};
+          hoverPoint:rect(sh.querySelector('button:not([hidden])')),add:rect(f.querySelector('[data-composer-navigation-target=add-context]'))};
       });
       const editor=action=>evaluate(action=>{
         const e=[...document.querySelectorAll('[data-composer-body] [contenteditable=true]')].find(e=>e.offsetWidth);

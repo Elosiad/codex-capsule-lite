@@ -6,36 +6,100 @@ import {DatabaseSync} from 'node:sqlite';
 export const threadId = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const positive = n => Number.isFinite(n) && n > 0;
 const pct = n => Math.max(0,Math.min(100,n));
+const count=n=>Number.isSafeInteger(n)&&n>=0?n:null;
+
+export function contextUsage(info){
+  const u=info?.last_token_usage,used=count(u?.total_tokens),max=info?.model_context_window;
+  if(used==null||!positive(max))return null;
+  const input=count(u.input_tokens),read=count(u.cached_input_tokens),write=count(u.cache_write_input_tokens);
+  const output=count(u.output_tokens),reason=count(u.reasoning_output_tokens);
+  const validRead=input!=null && read!=null && read<=input;
+  const split=validRead && output!=null && reason!=null && output>=reason &&
+    info.last_usage_includes_reasoning!==false && used===input+output;
+  return {used,max,percent:pct(100*used/max),input,read,write,output,reason,split,
+    uncached:validRead?input-read:null,cacheRate:validRead&&input>0?100*read/input:null};
+}
+
+// Only return known protocol phrases and numeric codes to the renderer.
+// Arbitrary server messages can contain signed URLs, request headers or prompts.
+const reasons=[
+  [/insufficient_quota|usage_limit_reached|usageLimitExceeded|quota exceeded|quota exhausted|usage limit (?:has been )?reached/i,'额度已用尽','服务报告可用额度已耗尽。请查看额度重置时间。'],
+  [/model is at capacity|model is currently at capacity/i,'模型繁忙','所选模型暂时满载。'],
+  [/server overloaded|serverOverloaded|service unavailable|\b503\b/i,'服务繁忙','服务端暂时无法接收请求，可稍后再试。'],
+  [/rate_limit_exceeded|too many requests|rate limit reached|\b429\b/i,'请求受限','服务端限制了这次请求；可稍后再试。'],
+  [/unauthorized|authentication failed|\b401\b/i,'登录验证失败','服务端拒绝了当前凭据，可检查 Codex 登录状态。'],
+  [/forbidden|\b403\b/i,'访问被拒绝','服务端拒绝了此请求，请检查当前账号或模型权限。'],
+  [/ETIMEDOUT|timed?\s*out|responseStreamTimeout/i,'连接超时','等待响应超过时限。'],
+  [/websocket closed by server before response\.completed|ECONNRESET|connection reset by peer|websocket closed|unexpected eof/i,'连接中断','回复传输提前结束，Codex 没有收到完整响应。'],
+  [/stream disconnected before completion|responseStreamDisconnected|httpConnectionFailed|responseStreamConnectionFailed/i,'连接中断','与服务的连接未能建立或维持，具体断点未知。'],
+  [/\b50[024]\b|internal server error|internalServerError/i,'服务端错误','服务端处理请求时返回了错误。']
+];
+
+export function explainFailure(text, phase, at, attempt){
+  const msg=String(text||'').slice(-4096);
+  for(const [pattern,title,summary] of reasons){
+    const hit=msg.match(pattern);
+    if(hit)return {title,summary,technical:hit[0],phase,at,attempt};
+  }
+  return {title:'请求异常',summary:'Codex 报告了请求异常，当前记录未标明可确认的原因。',technical:'',phase,at,attempt};
+}
+
+export function retryDiagnostic(body,turn,at){
+  if(!threadId.test(turn)||typeof body!=='string')return null;
+  const marker=body.lastIndexOf('retrying sampling request');
+  if(marker<0)return null;
+  const part=body.slice(marker);
+  const rowTurn=part.match(/\bturn_id="?([0-9a-f-]{36})/i)?.[1];
+  if(rowTurn!==turn)return null;
+  const count=part.match(/\bretries=(\d+)\s+max_retries=(\d+)/);
+  const failure=explainFailure(part.split('sampling_error=').at(-1),'retry',at,count?count[1]+'/'+count[2]:'');
+  const delay=part.match(/\bin\s+(\d+(?:\.\d+)?)(ms|s)\)/);
+  if(delay)failure.retryAt=at+Math.round(Number(delay[1])*(delay[2]==='s'?1000:1));
+  return failure;
+}
 
 export function summarizeRecord(state, rec, id) {
   if(rec.type!=='event_msg')return;
   const e=rec.payload;
   if(!e || (e.thread_id && e.thread_id!==id))return;
+  const at=Date.parse(rec.timestamp)||0;
   switch(e.type){
     case 'task_started':
       state.turn=e.turn_id;
       state.speed=null;
       state.ttft=null;
       state.running=true;
+      state.startedAt=at;state.progressAt=0;state.failure=null;
       break;
+    case 'stream_error':
+    case 'error': {
+      if(state.turn && e.turn_id && state.turn!==e.turn_id)return;
+      const info=e.codex_error_info??e.codexErrorInfo;
+      const retry=e.type==='stream_error'||e.will_retry===true||e.willRetry===true;
+      state.failure=explainFailure([e.message,e.additional_details,JSON.stringify(info)].join(' '),retry?'retry':'failed',at);
+      break;
+    }
     case 'task_complete':
       if(state.turn && e.turn_id && state.turn!==e.turn_id)return;
       state.running=false;
+      if(state.failure?.phase==='retry'||(state.failure?.at&&state.progressAt>state.failure.at))state.failure=null;
       state.ttft=positive(e.time_to_first_token_ms)?e.time_to_first_token_ms:null;
       break;
     case 'turn_aborted':
-      if(!state.turn||!e.turn_id||state.turn===e.turn_id)state.running=false;
+      if(!state.turn||!e.turn_id||state.turn===e.turn_id){state.running=false;state.failure=null}
       break;
     case 'item_completed': {
       if(e.item?.type!=='AgentMessage'||(state.turn&&e.turn_id&&e.turn_id!==state.turn))return;
+      state.progressAt=Math.max(state.progressAt||0,at);
+      if(state.failure?.phase==='retry')state.failure=null;
       const ms=e.completed_at_ms-e.started_at_ms;
       state.speed=positive(e.started_at_ms)&&positive(ms)&&positive(e.content_token_count)
         ? {tokens:e.content_token_count,ms,tps:1000*e.content_token_count/ms}:null;
       break;
     }
     case 'token_count': {
-      const info=e.info, used=info?.last_token_usage?.total_tokens, max=info?.model_context_window;
-      if(Number.isFinite(used)&&used>=0&&positive(max))state.context={used,max,percent:pct(100*used/max)};
+      const context=contextUsage(e.info);
+      if(context)state.context=context;
       const q=e.rate_limits;
       if(q&&(!q.limit_id||q.limit_id==='codex')){
         const windows=[q.primary,q.secondary].filter(w=>Number.isFinite(w?.used_percent)).map(w=>({
@@ -138,6 +202,40 @@ export class LocalMetrics {
     try{s=await this.session(id)}catch{this.entries.delete(id)}
     const snapshot=await this.snapshot();
     const q=snapshot&&(!s.quota||snapshot.at>=s.quota.at)?snapshot:s.quota;
-    return {speed:s.speed??null,ttft:s.ttft??null,running:s.running===true,context:s.context??null,quota:quotaView(q)};
+    const retry=s.running&&s.turn?await this.retry(id,s):null;
+    const failure=s.failure && (!retry||s.failure.at>=retry.at||s.failure.phase==='failed')?s.failure:retry;
+    return {speed:s.speed??null,ttft:s.ttft??null,running:s.running===true,context:s.context??null,quota:quotaView(q),failure};
+  }
+  async retry(id,s){
+    const entry=this.entries.get(id);
+    if(!entry||!s.startedAt)return null;
+    if(entry.checkedTurn!==s.turn||!(Date.now()<entry.nextCheck)){
+      if(entry.checkedTurn!==s.turn){entry.retry=null;entry.lastLogId=0}
+      entry.checkedTurn=s.turn;entry.nextCheck=Date.now()+3000;
+      try{
+        if(!this.logsFile){
+          const files=(await fs.readdir(this.home)).filter(n=>/^logs_\d+\.sqlite$/.test(n));
+          this.logsFile=files.sort((a,b)=>parseInt(b.slice(5))-parseInt(a.slice(5)))[0];
+        }
+        if(!this.logsFile)return null;
+        const db=new DatabaseSync(path.join(this.home,this.logsFile),{readOnly:true,timeout:150});
+        try{
+          const high=db.prepare('SELECT max(id) AS n FROM logs').get().n||0;
+          if(high<(entry.lastLogId||0))entry.lastLogId=0;
+          if(high!==(entry.lastLogId||0)){
+            const rows=db.prepare(`SELECT ts,ts_nanos,substr(feedback_log_body,-4096) AS body FROM logs
+              WHERE thread_id=? AND ts BETWEEN ? AND ? AND id>? AND id<=? AND target='codex_core::responses_retry'
+              ORDER BY ts DESC,ts_nanos DESC LIMIT 12`).all(id,Math.floor(s.startedAt/1000),Math.floor(Date.now()/1000),entry.lastLogId||0,high);
+            for(const row of rows){
+            const at=row.ts*1000+Math.floor(row.ts_nanos/1e6);
+            const candidate=retryDiagnostic(row.body,s.turn,at);
+            if(candidate){entry.retry=candidate;break}
+            }
+            entry.lastLogId=high;
+          }
+        }finally{db.close()}
+      }catch{this.logsFile=null}
+    }
+    return entry.retry && entry.retry.at>(s.progressAt||0)?entry.retry:null;
   }
 }
