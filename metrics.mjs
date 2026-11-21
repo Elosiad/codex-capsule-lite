@@ -88,7 +88,9 @@ export function summarizeRecord(state, rec, id) {
   const at=Date.parse(rec.timestamp)||0;
   switch(e.type){
     case 'task_started':
+      if(e.turn_id&&state.turn===e.turn_id)break;
       state.turn=e.turn_id;
+      state.turnOutput=null;
       state.speed=null;
       state.finishedItem=null;
       state.ttft=null;
@@ -138,6 +140,17 @@ export function summarizeRecord(state, rec, id) {
       break;
     }
     case 'token_count': {
+      if(e.turn_id&&state.turn&&e.turn_id!==state.turn)return;
+      const total=count(e.info?.total_token_usage?.output_tokens);
+      const last=count(e.info?.last_token_usage?.output_tokens);
+      if(total!=null){
+        const prior=state.outputWatermark;
+        const delta=prior!=null&&total>=prior?total-prior:last;
+        if((state.running||(e.turn_id&&e.turn_id===state.turn))&&state.turn&&delta!=null){
+          state.turnOutput=(state.turnOutput??0)+delta;
+        }
+        state.outputWatermark=total;
+      }
       const context=contextUsage(e.info);
       if(context)state.context=context;
       const q=e.rate_limits;
@@ -168,6 +181,34 @@ export function quotaView(sample, now=Date.now()){
 
 // Ignore huge image/tool records without ever retaining their contents.
 const CHUNK=256*1024, MAX_LINE=512*1024, TAIL=3*1024*1024;
+// A tool result can push the beginning of the active turn out of the tail.
+// On cold reads find its boundary and the preceding usage snapshot. Inspect
+// compact JSONL headers only; giant attachment lines are skipped by consume.
+async function initialOffset(fd,size){
+  if(size<=TAIL)return 0;
+  const normal=size-TAIL;
+  let turnStart=null,next=Buffer.alloc(0);
+  for(let end=size;end>0;){
+    const start=Math.max(0,end-CHUNK),left=Math.max(0,start-1);
+    const block=Buffer.alloc(end-left);
+    if((await fd.read(block,0,block.length,left)).bytesRead!==block.length)return 0;
+    const bytes=Buffer.concat([block,next]);
+    // One preceding byte and 256 following bytes cover straddling headers.
+    const headers=bytes.toString('latin1').matchAll(/(?:^|\n)(\{"timestamp":"[^"\n]{8,40}",(?:"ordinal":\d+,)?"type":"event_msg","payload":\{"type":"(task_started|token_count)")/g);
+    for(const match of [...headers].reverse()){
+      const pos=match.index+(match[0][0]==='\n'?1:0);
+      const absolute=left+pos;
+      if(absolute<start||absolute>=end)continue;
+      if(turnStart==null){
+        if(match[2]==='task_started')turnStart=absolute;
+      }else if(match[2]==='token_count'&&!bytes.toString('latin1',pos,pos+256).includes('"info":null')){
+        return Math.min(normal,absolute);
+      }
+    }
+    next=block.subarray(start-left,start-left+256);end=start;
+  }
+  return turnStart==null?normal:Math.min(normal,turnStart);
+}
 function consume(entry,buffer,id){
   let pos=0;
   while(pos<buffer.length){
@@ -216,9 +257,11 @@ export class LocalMetrics {
     const fd=await fs.open(entry.file,'r');
     try{
       const st=await fd.stat();
-      if(entry.ino!==st.ino||entry.offset>st.size||st.size-entry.offset>TAIL){
-        entry.offset=Math.max(0,st.size-TAIL);entry.partial=Buffer.alloc(0);
-        entry.skip=entry.offset>0;entry.state={};entry.ino=st.ino;
+      if(entry.ino!==st.ino||entry.offset>st.size){
+        entry.offset=await initialOffset(fd,st.size);entry.partial=Buffer.alloc(0);
+        const preceding=Buffer.alloc(1);
+        if(entry.offset>0)await fd.read(preceding,0,1,entry.offset-1);
+        entry.skip=entry.offset>0&&preceding[0]!==10;entry.state={};entry.ino=st.ino;
       }
       const buf=Buffer.allocUnsafe(Math.min(CHUNK,st.size-entry.offset));
       while(entry.offset<st.size){
@@ -251,7 +294,7 @@ export class LocalMetrics {
     const retry=s.running&&s.turn?await this.retry(id,s):null;
     const failure=s.failure && (!retry||s.failure.at>=retry.at||s.failure.phase==='failed')?s.failure:retry;
     const composition=wantContent?await this.content.get(this.entries.get(id)?.file):null;
-    return {speed:s.speed??null,turn:s.turn??null,sentAt:s.sentAt??null,finishedItem:s.finishedItem??null,ttft:s.ttft??null,ttftSource:s.ttftSource??null,running:s.running===true,context:s.context??null,composition,quota:quotaView(q),failure};
+    return {speed:s.speed??null,turn:s.turn??null,turnOutput:s.turnOutput??null,sentAt:s.sentAt??null,finishedItem:s.finishedItem??null,ttft:s.ttft??null,ttftSource:s.ttftSource??null,running:s.running===true,context:s.context??null,composition,quota:quotaView(q),failure};
   }
   async retry(id,s){
     const entry=this.entries.get(id);

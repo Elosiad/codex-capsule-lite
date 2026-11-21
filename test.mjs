@@ -4,8 +4,26 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import {scanContent} from './content.mjs';
-import {quotaView,summarizeRecord,retryDiagnostic,explainFailure,contextUsage,StreamRate} from './metrics.mjs';
+import {quotaView,summarizeRecord,retryDiagnostic,explainFailure,contextUsage,StreamRate,LocalMetrics} from './metrics.mjs';
 const windows=[{minutes:300,remaining:42,reset:3000},{minutes:10080,remaining:68,reset:9000}];
+test('whole-turn output survives restart beyond the normal log tail; duplicates, tools and other turns do not inflate it',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'capsule-output-')),file=path.join(dir,'test.jsonl');
+  const id='a0000000-0000-4000-8000-000000000001';
+  const ev=(type,body={})=>JSON.stringify({timestamp:'2026-11-22T01:01:00Z',ordinal:1,type:'event_msg',payload:{type,...body}})+'\n';
+  const usage=(total,last,extra={})=>ev('token_count',{info:{total_token_usage:{output_tokens:total},last_token_usage:{output_tokens:last,reasoning_output_tokens:1}},...extra});
+  const reader=()=>{const m=new LocalMetrics(dir,dir);m.logPath=async()=>file;return m};
+  try{
+    await fs.writeFile(file,usage(1200,45)+ev('task_started',{turn_id:'t'})+usage(1200,45)+usage(1250,50));
+    const m=reader();assert.equal((await m.session(id)).turnOutput,50);
+    await fs.appendFile(file,ev('item_completed',{item:{type:'CommandExecution',output:'a'.repeat(4*1024*1024)}})+usage(1250,50)+usage(9000,100,{thread_id:'other'})+usage(8000,200,{turn_id:'other'})+usage(1320,70)+ev('task_complete',{turn_id:'t'}));
+    assert.equal((await m.session(id)).turnOutput,120);
+    assert.equal((await reader().session(id)).turnOutput,120);
+    await fs.appendFile(file,ev('task_started',{turn_id:'new'})+ev('token_count',{info:null}));
+    assert.equal((await m.session(id)).turnOutput,null);
+    await fs.appendFile(file,usage(1332,12)+ev('task_started',{turn_id:'new'})+usage(4,4)+usage(4,4)+ev('turn_aborted',{turn_id:'new'}));
+    assert.equal((await m.session(id)).turnOutput,16);
+  }finally{await fs.unlink(file);await fs.rmdir(dir)}
+});
 test('first commentary counts, tool and reasoning events do not; later messages cannot replace it',()=>{
   const s={},send=(type,payload={})=>summarizeRecord(s,{type:'event_msg',payload:{type,turn_id:'t',...payload}},'A');
   const item=(type,at,extra={})=>send('item_completed',{started_at_ms:at,completed_at_ms:at+100,item:{type,...extra}});

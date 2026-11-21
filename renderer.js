@@ -107,6 +107,8 @@
     }
     if(active==='speed'){
       pop.append(element('strong','heading panel-title',panels.speed));
+      if(v.ttftSource==='message')pop.append(element('div','stat-label speed-hint','首字按消息发出至首段正文开始计算'));
+      if(v.ttftSource==='screen')pop.append(element('div','stat-label speed-hint','首字来自界面采样，等待日志校准'));
       const grid=element('div','speed-grid');
       const measures=[
         [s?.live?'近 3 秒速度':'片段平均速度',s?(s.live?'≈':'')+num(s.tps):'—',s?'tokens/秒':'',buttons.speed.style.getPropertyValue('--ink')],
@@ -124,9 +126,10 @@
       }
       const caption=s?.live?'采样 '+num(s.ms/1000)+' 秒 · 约 '+num(s.tokens)+' tokens':
         s?'本段 '+num(s.tokens)+' tokens · 耗时 '+num(s.ms/1000)+' 秒 · '+num(s.tps)+' tokens/秒':'等待可计时的正文片段';
-      pop.append(grid,element('div','stamp',caption));
-      if(v.ttftSource==='message')pop.append(element('div','stat-label','首字按消息发出至首段正文开始计算'));
-      if(v.ttftSource==='screen')pop.append(element('div','stat-label','首字来自界面采样，等待日志校准'));
+      const total=element('div','turn-output');
+      total.append(element('span','','本轮累计输出'),element('b','',v.turnOutput==null?'待记录':num(v.turnOutput)+' tokens'));
+      total.title='当前聊天本轮各次模型请求已记录的输出，含工具调用与推理；每次用量落盘后更新。';
+      pop.append(grid,total,element('div','stamp',caption));
       return;
     }else if(active==='context'){
       if(!c){pop.append(element('strong','heading',panels.context),element('div','stamp','等待本聊天的用量记录'));return}
@@ -243,9 +246,12 @@
       .stamp{font-size:11px}.evidence{display:block;font-size:11px;overflow-wrap:anywhere}.stage{margin-top:5px;font-size:12px;font-weight:600}
       .cache{padding-bottom:7px;border-bottom:1px solid color-mix(in srgb,currentColor 13%,transparent)}
       .speed-grid{display:grid;grid-template-columns:max-content max-content;gap:20px;padding:3px 0 2px}
+      .turn-output{display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-top:7px;font-size:12px}
+      .turn-output b{font-variant-numeric:tabular-nums}
       .speed-stat{border-inline-start:2px solid var(--part);padding-inline-start:7px}
       .stat-label,.unit{font-size:11px;opacity:.76}.speed-value{display:flex;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums;white-space:nowrap}
       .speed-value b{font-size:18px;line-height:1.35;font-weight:650}.panel-title{margin-bottom:8px}
+      .panel-title:has(+.speed-hint){margin-bottom:2px}.speed-hint{margin-bottom:8px}
       [popover]{max-height:calc(100vh - 35px);overflow-y:auto}
       .composition-title{display:block;margin:10px 0 5px;font-size:13px}.breakdown{display:grid;grid-template-columns:max-content minmax(42px,1fr) max-content;align-items:center;gap:3px 8px;font-size:11px}.breakdown b{text-align:end;font-variant-numeric:tabular-nums}
       .track{background:color-mix(in srgb,currentColor 10%,transparent);border-radius:4px}.track i{display:block;height:4px;border-radius:4px;background:#88a9df}
