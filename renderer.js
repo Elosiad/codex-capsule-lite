@@ -268,6 +268,8 @@
     latest=value;
     const s=value?.speed,t=value?.ttft,c=value?.context,w=value?.quota?.windows||[];
     buttons.error.hidden=!value?.failure;
+    // Avoid a relational selector on the toolbar during streamed composer updates.
+    strip.classList.toggle('has-error',!!value?.failure);
     if(value?.failure){
       buttons.error.textContent=errorLabel(value.failure);
       buttons.error.dataset.phase=value.failure.phase;
@@ -341,7 +343,7 @@
       button:focus-visible{outline:1px solid currentColor}
       [popover]{box-sizing:border-box;position:fixed;inset:auto;margin:0;max-width:calc(100vw - 8px);border:1px solid color-mix(in srgb,currentColor 24%,transparent);border-radius:10px;background:var(--color-background-elevated,Canvas);color:var(--color-text,CanvasText);padding:8px 11px;font:inherit;font-size:12px;line-height:1.65;box-shadow:0 4px 16px #0003}
       button[hidden]{display:none}
-      .strip:has([data-metric="error"]:not([hidden])) button{padding-inline:4px;gap:3px}
+      .strip.has-error button{padding-inline:4px;gap:3px}
       button[data-metric="error"]{--ink:#df7e78;color:color-mix(in srgb,#df7e78 88%,currentColor);background:color-mix(in srgb,#df7e78 12%,transparent)}
       button[data-phase="retry"]{--ink:#d9a44d;color:var(--ink);background:color-mix(in srgb,#d9a44d 12%,transparent)}
       [popover]{min-width:min(208px,90vw);max-width:min(330px,96vw);border-radius:13px;padding:12px 15px;background:color-mix(in srgb,var(--color-background-elevated,Canvas) 93%,transparent);backdrop-filter:blur(14px);line-height:1.55;font-size:13px}
