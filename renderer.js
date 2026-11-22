@@ -274,7 +274,7 @@
     }else if(active==='error')closeDetail();
     const short=sizeMode!=='full';
     const speedLabel=s?.kind==='toolPending'?'工具生成 '+num(s.ms/1000)+'s':
-      (s?.kind==='tool'?'工具 ':'')+(s?speedNumber(s):'—')+' tokens/秒';
+      (s?.kind==='tool'?'工具 ':'')+(s?speedNumber(s):'—')+' tok/s';
     buttons.speed.textContent=speedLabel+' · 响应 '+(t!=null?waitNumber(value,t)+'s':'—');
     buttons.context.textContent=(short?'窗 ':'上下文 ')+(c?num(c.percent)+'%':'—');
     const quotaLabels=w.map(a=>(a.minutes===300?'5h额度 ':'周额度 ')+(a.remaining==null?'—':num(a.remaining)+'%'));
@@ -341,6 +341,7 @@
       button:focus-visible{outline:1px solid currentColor}
       [popover]{box-sizing:border-box;position:fixed;inset:auto;margin:0;max-width:calc(100vw - 8px);border:1px solid color-mix(in srgb,currentColor 24%,transparent);border-radius:10px;background:var(--color-background-elevated,Canvas);color:var(--color-text,CanvasText);padding:8px 11px;font:inherit;font-size:12px;line-height:1.65;box-shadow:0 4px 16px #0003}
       button[hidden]{display:none}
+      .strip:has([data-metric="error"]:not([hidden])) button{padding-inline:4px;gap:3px}
       button[data-metric="error"]{--ink:#df7e78;color:color-mix(in srgb,#df7e78 88%,currentColor);background:color-mix(in srgb,#df7e78 12%,transparent)}
       button[data-phase="retry"]{--ink:#d9a44d;color:var(--ink);background:color-mix(in srgb,#d9a44d 12%,transparent)}
       [popover]{min-width:min(208px,90vw);max-width:min(330px,96vw);border-radius:13px;padding:12px 15px;background:color-mix(in srgb,var(--color-background-elevated,Canvas) 93%,transparent);backdrop-filter:blur(14px);line-height:1.55;font-size:13px}
