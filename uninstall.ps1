@@ -16,7 +16,7 @@ if(Test-Path -LiteralPath $status){
         if(Get-Process -Id $old.pid -ErrorAction SilentlyContinue){throw 'Capsule has not stopped yet.'}
     }
 }
-foreach($f in 'capsule.mjs','cdp.mjs','metrics.mjs','content.mjs','tokenizer.cjs','renderer.js','launch.vbs','status.json','desktop.json','start-codex.ps1','stop.signal','uninstall.ps1'){
+foreach($f in 'capsule.mjs','cdp.mjs','metrics.mjs','content.mjs','tokenizer.cjs','renderer.js','launch.vbs','status.json','desktop.json','start-codex.ps1','follow-codex.ps1','follow.enabled','stop.signal','uninstall.ps1'){
     $file=Join-Path $dir $f
     if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file}
 }

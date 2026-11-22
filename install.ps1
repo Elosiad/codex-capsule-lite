@@ -1,11 +1,14 @@
+param([switch]$FollowCodex,[switch]$ManualStart)
 $ErrorActionPreference = 'Stop'
+if($FollowCodex -and $ManualStart){throw 'Choose only one startup mode.'}
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 & $node --disable-warning=ExperimentalWarning -e "require('node:sqlite'); if(typeof WebSocket!=='function') process.exit(1)"
 if ($LASTEXITCODE -ne 0) { throw 'Node.js 22.13 or newer with node:sqlite and WebSocket is required.' }
 $dir = Join-Path $env:LOCALAPPDATA 'CodexCapsule'
-$files = @('capsule.mjs','cdp.mjs','metrics.mjs','content.mjs','tokenizer.cjs','renderer.js','start-codex.ps1','uninstall.ps1')
+$files = @('capsule.mjs','cdp.mjs','metrics.mjs','content.mjs','tokenizer.cjs','renderer.js','start-codex.ps1','follow-codex.ps1','uninstall.ps1')
 foreach ($f in $files) { if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot $f))) { throw "Missing $f" } }
 [void][IO.Directory]::CreateDirectory($dir)
+$freshInstall=!(Test-Path -LiteralPath (Join-Path $dir 'capsule.mjs'))
 $status = Join-Path $dir 'status.json'
 $signal = Join-Path $dir 'stop.signal'
 if (Test-Path -LiteralPath $status) {
@@ -19,6 +22,9 @@ if (Test-Path -LiteralPath $status) {
 }
 if(Test-Path -LiteralPath $signal){Remove-Item -LiteralPath $signal}
 foreach ($f in $files) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination (Join-Path $dir $f) -Force }
+$followFlag=Join-Path $dir 'follow.enabled'
+if($ManualStart){if(Test-Path -LiteralPath $followFlag){Remove-Item -LiteralPath $followFlag}}
+elseif($FollowCodex -or $freshInstall){[IO.File]::WriteAllText($followFlag,'')}
 $main = Join-Path $dir 'capsule.mjs'
 $launcher = Join-Path $dir 'launch.vbs'
 $line = 'CreateObject("WScript.Shell").Run """' + $node + '"" --disable-warning=ExperimentalWarning ""' + $main + '""", 0, False'

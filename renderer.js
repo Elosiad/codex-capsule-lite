@@ -49,7 +49,7 @@
     error:'请求状态',speed:'输出与首字等待', context:'上下文占用', quota:'账户剩余额度'
   };
   const contentKinds={
-    results:['工具结果','#82a6d9'],calls:['工具调用','#da9b61'],
+    results:['工具结果','#e5786d'],calls:['工具调用','#da9b61'],
     instructions:['系统与开发者指令','#ad92d4'],user:['用户文字','#6eb7a0'],
     tools:['工具定义','#d8bc67'],assistant:['助手正文','#66aec8'],
     reason:['可见推理摘要','#cf88ab'],summary:['压缩摘要','#afba82'],
@@ -192,36 +192,36 @@
       const barLabel=num(c.percent)+'% 已用，'+remaining;
       bar.setAttribute('aria-label',barLabel);bar.title=barLabel;
       pop.append(usage,bar);
-      pop.append(element('strong','composition-title','已用内容构成'));
       const content=v.composition;
       if(!content){pop.append(element('div','stat-label','正在读取本地可识别内容…'));return}
+      pop.append(element('strong','composition-title','已用内容构成'));
       const table=element('div','breakdown');
       const values=Object.entries(content.text).filter(([,n])=>n>0).sort((a,b)=>b[1]-a[1]);
       const estimated=values.reduce((sum,[,n])=>sum+n,0);
       if(c.used>estimated)values.push(['unclassified',c.used-estimated]);
-      const total=Math.max(c.used,estimated),stops=[];
-      let cumulative=0;
+      const total=Math.max(c.used,estimated);
       for(const [key,n] of values){
         const [label,color]=contentKinds[key]||contentKinds.other;
-        const start=cumulative/total*100;
-        cumulative+=n;stops.push(color+' '+start+'% '+(cumulative/total*100)+'%');
         const entry=element('div','ctx-entry');
-        entry.title=label+' · 约占 '+num(100*n/total)+'%';
-        entry.style.setProperty('--key-color',color);
-        entry.append(element('span','',label),element('b','',kilo(n)));table.append(entry);
+        const percent=100*n/total;
+        const share=percent<0.1?'<0.1%':num(percent)+'%';
+        entry.title=label+' · '+kilo(n)+' · 约占已用部分 '+share;
+        const segment=element('span','');
+        segment.style.flexGrow=String(n);
+        segment.style.backgroundColor=color;
+        segment.title=entry.title;
+        fill.append(segment);
+        entry.style.setProperty('--part',color);
+        entry.append(element('span','',label),element('b','',share),element('small','',kilo(n)));
+        table.append(entry);
       }
-      const layout=element('div','composition-layout');layout.append(table);
-      if(stops.length&&c.used>0){
-        const pie=element('div','ctx-pie');pie.style.background='conic-gradient('+stops.join(',')+')';
-        pie.setAttribute('aria-hidden','true');pie.title='已用内容构成（估算）';layout.append(pie);
-      }
-      pop.append(layout);
+      pop.append(table);
       const media=['当前记录图片 '+content.images+' 张'];
       if(content.files)media.push('文件 '+content.files+' 个');
       if(content.audio)media.push('音频 '+content.audio+' 段');
       pop.append(element('div','attachments',media.join(' · ')));
       pop.append(element('div','stat-label',remaining+'。文字按 o200k_base 估算。'+
-        (estimated>c.used?'文字估算超过已用量，扇形按各项估算占比分配。':c.used>estimated?'未归类为已用量减去可识别文字的估算差额，含图片等内容。':'')+
+        (estimated>c.used?'文字估算超过已用量，色段按各项估算占比分配。':c.used>estimated?'未归类为已用量减去可识别文字的估算差额，含图片等内容。':'')+
         (content.partial?'本地记录不完整。':'')));
       return;
     }
@@ -327,21 +327,20 @@
       .speed-grid{display:grid;grid-template-columns:max-content max-content;gap:20px;padding:3px 0 2px}
       .turn-output{display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-top:7px;font-size:12px}
       .turn-output b{font-variant-numeric:tabular-nums}
-      .speed-stat{border-inline-start:2px solid var(--part);padding-inline-start:7px}
+      .speed-stat,.ctx-entry{border-inline-start:2px solid var(--part);padding-inline-start:7px}
       .stat-label,.unit{font-size:11px;opacity:.76}.speed-value{display:flex;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums;white-space:nowrap}
       .speed-value b{font-size:18px;line-height:1.35;font-weight:650}.panel-title{margin-bottom:8px}
       .panel-title:has(+.speed-hint){margin-bottom:2px}.speed-hint{margin-bottom:8px}
       [popover]{max-height:calc(100vh - 35px);overflow-y:auto}
-      .composition-title{display:block;margin:10px 0 5px;font-size:13px}.breakdown{display:grid;gap:2px;font-size:11px}
-      .composition-layout{display:flex;align-items:center;gap:14px}.breakdown{flex:1;min-width:0}
-      .ctx-pie{width:clamp(52px,16vw,90px);aspect-ratio:1;flex:none;border-radius:50%}
-      .ctx-entry{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:7px}
-      .ctx-entry::before{content:"";width:8px;height:8px;border-radius:2px;background:var(--key-color)}
-      .ctx-entry b{font-variant-numeric:tabular-nums}
+      .composition-title{display:block;margin:10px 0 6px;font-size:13px}
+      [popover]:has(> .breakdown > .ctx-entry){width:min(312px,96vw)}
+      .breakdown{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,12.7em),1fr));row-gap:7px;font-size:11px}
+      .ctx-entry{box-sizing:border-box;display:grid;grid-template-columns:auto max-content;justify-content:start;align-content:start;column-gap:4px;min-width:0;line-height:1.35}
+      .ctx-entry b,.ctx-entry small{font-variant-numeric:tabular-nums}.ctx-entry small{grid-column:1/-1;font-size:inherit;opacity:.76}
       .attachments,.balance{margin:5px 0;font-size:12px}
       .ctx-usage{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}.ctx-usage span{opacity:.8}
       .ctx-bar{display:flex;overflow:hidden;height:7px;border-radius:5px;background:color-mix(in srgb,currentColor 12%,transparent);margin:8px 0 10px}
-      .ctx-fill{background:#82a6d9}
+      .ctx-fill{display:flex;background:#82a6d9}.ctx-fill > span{flex-basis:0;min-width:0}
     `;
     strip=document.createElement('div');strip.className='strip';strip.setAttribute('role','group');strip.setAttribute('aria-label','Codex Capsule');
     for(const [k,label] of Object.entries(panels)){
