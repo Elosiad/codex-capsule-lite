@@ -30,6 +30,7 @@ export const threadId = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const positive = n => Number.isFinite(n) && n > 0;
 const pct = n => Math.max(0,Math.min(100,n));
 const count=n=>Number.isSafeInteger(n)&&n>=0?n:null;
+let toolTokenizer;
 
 export function contextUsage(info){
   const u=info?.last_token_usage,used=count(u?.total_tokens),max=info?.model_context_window;
@@ -85,6 +86,22 @@ export function retryDiagnostic(body,turn,at){
 }
 
 export function summarizeRecord(state, rec, id) {
+  if(rec.type==='response_item'){
+    const p=rec.payload;
+    if(!state.running||!state.turn||!(p?.type==='function_call'||p?.type==='custom_tool_call'))return;
+    const meta=p.internal_chat_message_metadata_passthrough;
+    const toolId=p.id||p.call_id;
+    if(meta?.turn_id!==state.turn||!toolId||p.status==='in_progress'||state.toolIds.has(toolId))return;
+    state.toolIds.add(toolId);
+    if(!positive(meta.create_time))return;
+    const at=Date.parse(rec.timestamp),start=Math.round(meta.create_time*1000);
+    const args=p.type==='function_call'?p.arguments:p.input;
+    if(typeof args!=='string'||!args||!(at>start)||start<state.startedAt||at<(state.speedAt||0))return;
+    state.speedAt=at;
+    // Only tokenize the last eligible item in a disk read (also on cold replay).
+    state.toolCandidate={args,ms:at-start};
+    return;
+  }
   if(rec.type!=='event_msg')return;
   const e=rec.payload;
   if(!e || (e.thread_id && e.thread_id!==id))return;
@@ -95,6 +112,7 @@ export function summarizeRecord(state, rec, id) {
       state.turn=e.turn_id;
       state.turnOutput=null;
       state.speed=null;
+      state.speedAt=0;state.toolCandidate=null;state.toolIds=new Set();
       state.finishedItem=null;
       state.ttft=null;
       state.ttftSource=null;state.sentAt=null;state.firstTextSeen=false;
@@ -126,17 +144,20 @@ export function summarizeRecord(state, rec, id) {
         if(state.turn&&state.running&&!state.sentAt&&!state.firstTextSeen&&positive(e.started_at_ms))state.sentAt=e.started_at_ms;
         return;
       }
-      if(e.item?.type!=='AgentMessage')return;
-      const hasText=positive(e.content_token_count)||e.item.content?.some?.(p=>typeof p?.text==='string'&&p.text.trim());
-      if(hasText&&!state.firstTextSeen){
+      const summary=e.item?.type==='Reasoning';
+      if(!summary&&e.item?.type!=='AgentMessage')return;
+      const hasText=summary?e.item.summary_text?.some?.(text=>typeof text==='string'&&text.trim()):
+        positive(e.content_token_count)||e.item.content?.some?.(p=>typeof p?.text==='string'&&p.text.trim());
+      if(hasText&&!state.firstTextSeen&&positive(state.sentAt)&&e.started_at_ms>=state.sentAt&&e.started_at_ms<=e.completed_at_ms){
         state.firstTextSeen=true;
-        if(positive(state.sentAt)&&e.started_at_ms>=state.sentAt && e.started_at_ms<=e.completed_at_ms){
-          state.ttft=e.started_at_ms-state.sentAt;state.ttftSource='message';
-        }
+        state.ttft=e.started_at_ms-state.sentAt;state.ttftSource=summary?'summary':'message';
       }
+      if(summary)return;
       state.progressAt=Math.max(state.progressAt||0,at);
       state.finishedItem=e.item.id??null;
       if(state.failure?.phase==='retry')state.failure=null;
+      if(at<(state.speedAt||0))return;
+      state.speedAt=at;state.toolCandidate=null;
       const ms=e.completed_at_ms-e.started_at_ms;
       state.speed=positive(e.started_at_ms)&&positive(ms)&&positive(e.content_token_count)
         ? {tokens:e.content_token_count,ms,tps:1000*e.content_token_count/ms}:null;
@@ -221,7 +242,7 @@ function consume(entry,buffer,id){
       else entry.partial=Buffer.concat([entry.partial,buffer.subarray(pos,end)]);
     }
     if(nl<0)break;
-    if(!entry.skip && entry.partial.includes('"event_msg"')){
+    if(!entry.skip && (entry.partial.includes('"event_msg"')||entry.partial.subarray(0,180).includes('"response_item"'))){
       try{summarizeRecord(entry.state,JSON.parse(entry.partial.toString()),id)}catch{}
     }
     entry.partial=Buffer.alloc(0);entry.skip=false;pos=nl+1;
@@ -272,6 +293,13 @@ export class LocalMetrics {
         if(!bytesRead)break;
         consume(entry,buf.subarray(0,bytesRead),id);entry.offset+=bytesRead;
       }
+      const pending=entry.state.toolCandidate;
+      if(pending){
+        entry.state.toolCandidate=null;
+        toolTokenizer??=require('./tokenizer.cjs');
+        const tokens=toolTokenizer.countTokens(pending.args,{disallowedSpecial:new Set()});
+        entry.state.speed={kind:'tool',tokens,ms:pending.ms,tps:tokens*1000/pending.ms};
+      }
       return entry.state;
     }finally{await fd.close()}
   }
@@ -295,15 +323,28 @@ export class LocalMetrics {
     const snapshot=await this.snapshot();
     const q=snapshot&&(!s.quota||snapshot.at>=s.quota.at)?snapshot:s.quota;
     const retry=s.running&&s.turn?await this.retry(id,s):null;
+    const entry=this.entries.get(id);
+    const pending=entry?.toolStart;
+    const waiting=s.running&&pending&&entry.checkedTurn===s.turn&&!s.toolIds?.has(pending.id)&&pending.at>(s.progressAt||0)&&!retry&&!s.failure;
+    let speed=s.speed??null;
+    if(waiting)speed={kind:'toolPending',ms:3000*Math.floor(Math.max(0,Date.now()-pending.at)/3000)};
+    // Keep rapid calls from flickering; text sampling has its own 3-second clock.
+    if(entry&&s.running&&(waiting||speed?.kind==='tool')){
+      const now=Date.now();
+      if(entry.speedTurn!==s.turn||now>=entry.nextSpeed||!entry.toolDisplay){
+        entry.speedTurn=s.turn;entry.nextSpeed=now+3000;entry.toolDisplay=speed;
+      }
+      speed=entry.toolDisplay;
+    }else if(entry)entry.toolDisplay=null;
     const failure=s.failure && (!retry||s.failure.at>=retry.at||s.failure.phase==='failed')?s.failure:retry;
     const composition=wantContent?await this.content.get(this.entries.get(id)?.file):null;
-    return {speed:s.speed??null,turn:s.turn??null,turnOutput:s.turnOutput??null,sentAt:s.sentAt??null,finishedItem:s.finishedItem??null,ttft:s.ttft??null,ttftSource:s.ttftSource??null,running:s.running===true,context:s.context??null,composition,quota:quotaView(q),failure};
+    return {speed,turn:s.turn??null,turnOutput:s.turnOutput??null,sentAt:s.sentAt??null,finishedItem:s.finishedItem??null,ttft:s.ttft??null,ttftSource:s.ttftSource??null,running:s.running===true,context:s.context??null,composition,quota:quotaView(q),failure};
   }
   async retry(id,s){
     const entry=this.entries.get(id);
     if(!entry||!s.startedAt)return null;
     if(entry.checkedTurn!==s.turn||!(Date.now()<entry.nextCheck)){
-      if(entry.checkedTurn!==s.turn){entry.retry=null;entry.lastLogId=0}
+      if(entry.checkedTurn!==s.turn){entry.retry=null;entry.toolStart=null;entry.lastLogId=0}
       entry.checkedTurn=s.turn;entry.nextCheck=Date.now()+3000;
       try{
         if(!this.logsFile){
@@ -314,8 +355,15 @@ export class LocalMetrics {
         const db=new DatabaseSync(path.join(this.home,this.logsFile),{readOnly:true,timeout:150});
         try{
           const high=db.prepare('SELECT max(id) AS n FROM logs').get().n||0;
-          if(high<(entry.lastLogId||0))entry.lastLogId=0;
+          if(high<(entry.lastLogId||0)){entry.lastLogId=0;entry.toolStart=null}
           if(high!==(entry.lastLogId||0)){
+            const stream=db.prepare(`SELECT ts,ts_nanos,substr(feedback_log_body,-256) AS tail FROM logs
+              WHERE thread_id=? AND ts BETWEEN ? AND ? AND id>? AND id<=? AND target='codex_core::stream_events_utils'
+              AND instr(feedback_log_body,?)>0 ORDER BY id DESC LIMIT 1`).get(id,Math.floor(s.startedAt/1000),Math.floor(Date.now()/1000),entry.lastLogId||0,high,'turn_id='+s.turn);
+            if(stream){
+              const added=stream.tail.match(/\}: Output item item_type="(?:custom_tool_call|function_call)" item_id="([^"]{1,160})"\s*$/);
+              entry.toolStart=added?{id:added[1],at:stream.ts*1000+Math.floor(stream.ts_nanos/1e6)}:null;
+            }
             const rows=db.prepare(`SELECT ts,ts_nanos,feedback_log_body AS body FROM logs
               WHERE thread_id=? AND ts BETWEEN ? AND ? AND id>? AND id<=? AND target='codex_core::responses_retry'
               ORDER BY ts DESC,ts_nanos DESC LIMIT 12`).iterate(id,Math.floor(s.startedAt/1000),Math.floor(Date.now()/1000),entry.lastLogId||0,high);
@@ -327,7 +375,7 @@ export class LocalMetrics {
             entry.lastLogId=high;
           }
         }finally{db.close()}
-      }catch{this.logsFile=null}
+      }catch{this.logsFile=null;entry.toolStart=null}
     }
     return entry.retry && entry.retry.at>(s.progressAt||0)?entry.retry:null;
   }

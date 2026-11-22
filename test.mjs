@@ -25,7 +25,7 @@ test('whole-turn output survives restart beyond the normal log tail; duplicates,
     assert.equal((await m.session(id)).turnOutput,16);
   }finally{await fs.unlink(file);await fs.rmdir(dir)}
 });
-test('first commentary counts, tool and reasoning events do not; later messages cannot replace it',()=>{
+test('first commentary counts, empty reasoning and tool events do not; later messages cannot replace it',()=>{
   const s={},send=(type,payload={})=>summarizeRecord(s,{type:'event_msg',payload:{type,turn_id:'t',...payload}},'A');
   const item=(type,at,extra={})=>send('item_completed',{started_at_ms:at,completed_at_ms:at+100,item:{type,...extra}});
   send('task_started');item('UserMessage',1000);item('Reasoning',1500);item('CommandExecution',1800);
@@ -34,6 +34,41 @@ test('first commentary counts, tool and reasoning events do not; later messages 
   item('UserMessage',6000);item('AgentMessage',7000,{phase:'final',content:[{text:'好了'}]});
   send('task_complete',{time_to_first_token_ms:3751});assert.equal(s.ttft,3655);
   send('task_started',{turn_id:'next'});assert.equal(s.ttft,null);
+});
+test('first nonempty public summary is timed independently of speed; raw reasoning and empty summaries are ignored',()=>{
+  const s={},send=(type,body={})=>summarizeRecord(s,{type:'event_msg',payload:{type,turn_id:'t',...body}},'A');
+  const completed=(type,start,fields)=>send('item_completed',{started_at_ms:start,completed_at_ms:start+100,item:{type,...fields}});
+  send('task_started');completed('UserMessage',1000,{});
+  completed('Reasoning',1200,{raw_content:['private'],summary_text:[' ']});assert.equal(s.ttft,null);
+  completed('Reasoning',1450,{summary_text:['public']});assert.equal(s.ttft,450);assert.equal(s.ttftSource,'summary');assert.equal(s.speed,null);
+  completed('AgentMessage',6000,{content:[{text:'hello'}]});send('task_complete',{time_to_first_token_ms:3500});assert.equal(s.ttft,450);
+});
+test('tool input is timed from model creation to completed call, with a pending state before parameters arrive',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'capsule-tool-')),file=path.join(dir,'log.jsonl');
+  const id='a0000000-0000-4000-8000-000000000001',turn='b0000000-0000-4000-8000-000000000001';
+  const start=Math.floor(Date.now()/1000)*1000-9000;
+  const rec=(at,type,payload)=>JSON.stringify({timestamp:new Date(at).toISOString(),type,payload})+'\n';
+  const tool=(kind,key,args)=>({type:kind,id:key,status:'completed',[kind==='function_call'?'arguments':'input']:args,internal_chat_message_metadata_passthrough:{turn_id:turn,create_time:(start+1000)/1000}});
+  const db=new DatabaseSync(path.join(dir,'logs_2.sqlite'));
+  try{
+    db.exec('CREATE TABLE logs(id INTEGER PRIMARY KEY,thread_id TEXT,ts INTEGER,ts_nanos INTEGER,target TEXT,feedback_log_body TEXT)');
+    db.prepare('INSERT INTO logs VALUES(1,?,?,0,?,?)').run(id,start/1000+1,'codex_core::stream_events_utils','run{turn_id='+turn+'}: Output item item_type="custom_tool_call" item_id="ctc_1"');
+    await fs.writeFile(file,rec(start,'event_msg',{type:'task_started',turn_id:turn}));
+    const m=new LocalMetrics(dir,dir);m.logPath=async()=>file;
+    const pending=(await m.read(id)).speed;assert.equal(pending.kind,'toolPending');assert(pending.ms>=6000);
+    const call=tool('custom_tool_call','ctc_1','hello world');
+    await fs.appendFile(file,rec(start+3000,'response_item',call));
+    m.entries.get(id).nextSpeed=0;
+    const speed=(await m.read(id)).speed;assert.deepEqual(speed,{kind:'tool',tokens:2,ms:2000,tps:1});
+    await fs.appendFile(file,rec(start+4000,'response_item',call)+rec(start+5000,'response_item',{type:'custom_tool_call_output',output:'x'.repeat(5000)})+
+      rec(start+5500,'event_msg',{type:'item_completed',turn_id:turn,item:{type:'CommandExecution'}}));
+    assert.deepEqual((await m.session(id)).speed,speed);assert.equal((await m.read(id)).turnOutput,null);
+    await fs.appendFile(file,rec(start+7000,'response_item',tool('function_call','fc_2','hello'))+
+      rec(start+8000,'response_item',{...tool('function_call','fc_other','ignored'),internal_chat_message_metadata_passthrough:{turn_id:'other',create_time:start/1000}}));
+    assert.equal((await m.session(id)).speed.ms,6000);
+    await fs.appendFile(file,rec(start+9000,'event_msg',{type:'task_started',turn_id:'new'}));
+    assert.equal((await m.read(id)).speed,null);
+  }finally{db.close();await fs.rm(file,{force:true});await fs.unlink(path.join(dir,'logs_2.sqlite'));await fs.rmdir(dir)}
 });
 test('live speed uses timed additions, clears on idle and resets on item/turn changes',()=>{
   const rate=new StreamRate();

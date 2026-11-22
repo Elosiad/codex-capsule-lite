@@ -46,7 +46,7 @@
     ${questionFooter} [data-composer-input-layout="single-line"] > *{overflow:visible}`;
   document.head.append(questionStyle);
   const panels={
-    error:'请求状态',speed:'输出与首字等待', context:'上下文占用', quota:'账户剩余额度'
+    error:'请求状态',speed:'输出与首次响应', context:'上下文占用', quota:'账户剩余额度'
   };
   const contentKinds={
     results:['工具结果','#e5786d'],calls:['工具调用','#da9b61'],
@@ -59,6 +59,22 @@
   const buttons={};
   let observed=null;
   let firstWatch=null;
+  let summaryWatch=null;
+  // Watch the public summary notification from this renderer, not reasoning text.
+  // Arm at turn start so opening a running chat cannot register a late delta as its first.
+  function watchSummary(event){
+    if(event.source!==window||event.origin!==location.origin||document.hidden)return;
+    const n=event.data;
+    if(n?.type!=='mcp-notification'||!id||n.params?.threadId!==id)return;
+    if(n.method==='turn/started'){
+      const turn=n.params.turn?.id;
+      if(turn&&summaryWatch?.turn!==turn)summaryWatch={thread:id,turn,at:null};
+    }else if(n.method==='item/reasoning/summaryTextDelta'&&summaryWatch?.thread===id&&
+      summaryWatch.turn===n.params.turnId&&summaryWatch.at===null&&typeof n.params.delta==='string'&&n.params.delta.trim()){
+      summaryWatch.at=Date.now();
+    }
+  }
+  window.addEventListener('message',watchSummary);
   function streamSample(expected,turn,finished,sentAt){
     if(document.hidden||sync()!==expected||!turn){observed=null;firstWatch=null;return null}
     const scope=root?.closest('[data-app-action-timeline-scroll]')||root?.closest('main');
@@ -90,6 +106,8 @@
   let toolbarWatch,layoutFrame=0;
   const number=new Intl.NumberFormat('zh-CN',{maximumFractionDigits:1});
   const num=n=>number.format(n);
+  const speedNumber=s=>(s.live||s.kind==='tool'?'≈':'')+num(s.tps);
+  const waitNumber=(v,t)=>(['screen','summary','official'].includes(v?.ttftSource)?'≈':'')+num(t/1000);
   const kilo=n=>n==null?'—':n>0&&n<10?'<0.01K':(n>=1000?num(n/1000):Number((n/1000).toFixed(2)))+'K';
   const clock=t=>t?new Date(t).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'未知';
   const planName=p=>({prolite:'Pro',pro:'Pro',plus:'Plus'})[p]||p||'账户额度';
@@ -156,12 +174,18 @@
     }
     if(active==='speed'){
       pop.append(element('strong','heading panel-title',panels.speed));
-      if(v.ttftSource==='message')pop.append(element('div','stat-label speed-hint','首字按消息发出至首段正文开始计算'));
-      if(v.ttftSource==='screen')pop.append(element('div','stat-label speed-hint','首字来自界面采样，等待日志校准'));
+      const hint={
+        message:'从发出消息到首段助手正文开始，含进度回复。',
+        summary:'从发出消息到首段可见思考摘要，按日志片段起点估算。',
+        summaryDelta:'从发出消息到界面收到第一段非空思考摘要。',
+        screen:'从发出消息到界面首次采样到助手正文。',
+        official:'缺少可见响应的时间，采用 Codex 记录的首 Token 耗时。'
+      }[v.ttftSource];
+      if(hint)pop.append(element('div','stat-label speed-hint',hint));
       const grid=element('div','speed-grid');
       const measures=[
-        [s?.live?'近 3 秒速度':'片段平均速度',s?(s.live?'≈':'')+num(s.tps):'—',s?'tokens/秒':'',buttons.speed.style.getPropertyValue('--ink')],
-        [v.ttftSource==='official'?'官方首 Token':'首字等待',v.ttft!=null?(v.ttftSource==='screen'?'≈':'')+num(v.ttft/1000):'—',v.ttft!=null?'秒':'','#88a9df']
+        [s?.kind==='toolPending'?'工具参数生成中':s?.kind==='tool'?'工具参数平均速度':s?.live?'近 3 秒速度':'片段平均速度',s?.kind==='toolPending'?num(s.ms/1000):s?speedNumber(s):'—',s?.kind==='toolPending'?'秒':s?'tokens/秒':'',buttons.speed.style.getPropertyValue('--ink')],
+        ['首次响应',v.ttft!=null?waitNumber(v,v.ttft):'—',v.ttft!=null?'秒':'','#88a9df']
       ];
       for(const [label,amount,unit,color] of measures){
         const col=element('div','speed-stat'),value=element('div','speed-value');
@@ -169,11 +193,12 @@
         value.append(element('b','',amount));
         if(unit)value.append(element('span','unit',unit));
         col.append(element('span','stat-label',label),value);
-        if(color==='#88a9df')col.title=v.ttftSource==='message'?'用户消息时间 → 首条助手正文的日志起始时间':
-          v.ttftSource==='screen'?'用户消息时间 → 本机首次采样到正文':v.ttftSource==='official'?'缺少正文时间，采用 Codex 轮次首 Token 记录':'等待首条正文的时间记录';
+        if(label==='首次响应')col.title=hint||'等待首段可见思考摘要或助手正文。';
         grid.append(col);
       }
-      const caption=s?.live?'采样 '+num(s.ms/1000)+' 秒 · 约 '+num(s.tokens)+' tokens':
+      const caption=s?.kind==='toolPending'?'等待完整工具参数落盘后计算速度':
+        s?.kind==='tool'?'工具参数约 '+num(s.tokens)+' tokens · 生成约 '+num(s.ms/1000)+' 秒':
+        s?.live?'采样 '+num(s.ms/1000)+' 秒 · 约 '+num(s.tokens)+' tokens':
         s?'本段 '+num(s.tokens)+' tokens · 耗时 '+num(s.ms/1000)+' 秒 · '+num(s.tps)+' tokens/秒':'等待可计时的正文片段';
       const total=element('div','turn-output');
       total.append(element('span','','本轮累计输出'),element('b','',v.turnOutput==null?'待记录':num(v.turnOutput)+' tokens'));
@@ -248,12 +273,14 @@
       buttons.error.dataset.phase=value.failure.phase;
     }else if(active==='error')closeDetail();
     const short=sizeMode!=='full';
-    buttons.speed.textContent=(s?(s.live?'≈':'')+num(s.tps):'—')+(short?' tokens/秒 · ':' tokens/秒 · 首字 ')+(t!=null?(value.ttftSource==='screen'?'≈':'')+num(t/1000)+'s':'—');
+    const speedLabel=s?.kind==='toolPending'?'工具生成 '+num(s.ms/1000)+'s':
+      (s?.kind==='tool'?'工具 ':'')+(s?speedNumber(s):'—')+' tokens/秒';
+    buttons.speed.textContent=speedLabel+' · 响应 '+(t!=null?waitNumber(value,t)+'s':'—');
     buttons.context.textContent=(short?'窗 ':'上下文 ')+(c?num(c.percent)+'%':'—');
     const quotaLabels=w.map(a=>(a.minutes===300?'5h额度 ':'周额度 ')+(a.remaining==null?'—':num(a.remaining)+'%'));
     if(value?.quota?.balance!=null)quotaLabels.push('余额 '+value.quota.balance);
     buttons.quota.textContent=quotaLabels.join(' · ')||'额度 —';
-    buttons.speed.style.setProperty('--ink',!s?'#94989d':s.tps>=25?'#56b986':s.tps>=10?'#dfab4a':'#de786a');
+    buttons.speed.style.setProperty('--ink',s?.tps==null?'#94989d':s.tps>=25?'#56b986':s.tps>=10?'#dfab4a':'#de786a');
     buttons.speed.toggleAttribute('data-live',!!s?.live);
     buttons.context.style.setProperty('--used',(c?.percent||0)+'%');
     buttons.context.style.setProperty('--ink',c?.percent>=90?'#de786a':c?.percent>=75?'#dfab4a':'#88a9df');
@@ -375,7 +402,7 @@
       mount(f);
     }
     const next=identity();
-    if(next!==id){closeDetail();id=next;host.dataset.thread=id;signature='';draw(null)}
+    if(next!==id){closeDetail();summaryWatch=null;id=next;host.dataset.thread=id;signature='';draw(null)}
     return id;
   }
   // Track identity changes synchronously at the DOM mutation boundary. The local
@@ -403,7 +430,13 @@
   window.addEventListener('scroll',reposition,true);
   window[key]={
     streamSample,
-    observedWait(expected,turn){return sync()===expected&&firstWatch?.key===expected+'/'+turn?firstWatch.wait:null},
+    observedWait(expected,turn,sentAt){
+      if(sync()!==expected||!sentAt)return null;
+      const body=firstWatch?.key===expected+'/'+turn?firstWatch.wait:null;
+      const at=summaryWatch?.thread===expected&&summaryWatch.turn===turn?summaryWatch.at:null;
+      if(at>=sentAt&&(body==null||at-sentAt<body))return {ms:at-sentAt,source:'summaryDelta'};
+      return body==null?null:{ms:body,source:'screen'};
+    },
     wantsContent(){return active==='context'&&pop?.matches(':popover-open')},
     current(){if(document.hidden)return null;return sync()},
     apply(expected,value){
@@ -417,7 +450,7 @@
       }
       return true;
     },
-    dispose(){observer.disconnect();window.removeEventListener('resize',reposition);window.removeEventListener('scroll',reposition,true);
+    dispose(){observer.disconnect();window.removeEventListener('message',watchSummary);window.removeEventListener('resize',reposition);window.removeEventListener('scroll',reposition,true);
       sizing?.disconnect();toolbarWatch?.disconnect();cancelAnimationFrame(layoutFrame);closeDetail();host?.remove();root?.removeAttribute('data-codex-capsule-question');questionStyle.remove();delete window[key]}
   };
   return true;

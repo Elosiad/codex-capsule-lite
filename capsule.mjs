@@ -64,9 +64,12 @@ try{
         const data=await metrics.read(id,await c.evaluate(api+"?.wantsContent?.()===true"));
         c.streamRate??=new StreamRate();
         const sample=data.running&&data.turn?await c.evaluate(api+'?.streamSample?.('+[id,data.turn,data.finishedItem,data.sentAt].map(x=>JSON.stringify(x)).join(',')+')'):null;
-        if(data.running&&data.ttft==null&&data.sentAt){
-          const wait=await c.evaluate(api+'?.observedWait?.('+JSON.stringify(id)+','+JSON.stringify(data.turn)+')');
-          if(Number.isFinite(wait)){data.ttft=wait;data.ttftSource='screen'}
+        if(data.sentAt&&(data.running||data.ttftSource==='summary')){
+          const wait=await c.evaluate(api+'?.observedWait?.('+[id,data.turn,data.sentAt].map(x=>JSON.stringify(x)).join(',')+')');
+          if(Number.isFinite(wait?.ms)&&(data.ttft==null||
+              (wait.source==='summaryDelta'&&(data.ttftSource==='summary'||wait.ms<data.ttft)))){
+            data.ttft=wait.ms;data.ttftSource=wait.source;
+          }
         }
         const live=c.streamRate.sample(sample);
         if(live)data.speed=live;
