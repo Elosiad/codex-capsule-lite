@@ -3,8 +3,57 @@
   const key=Symbol.for('codex-capsule.local.v1');
   if(window[key])return;
   const idAttr='data-above-composer-conversation-id';
+  // Request cards use Codex's single-line state internally. Give that surface
+  // the normal thread layout without moving the editor or disturbing its selection.
+  const questionStyle=document.createElement('style');
+  const questionRoot='[data-codex-capsule-question]';
+  const requestCard='[data-codex-composer-request-navigation]';
+  const questionFooter=questionRoot+' [data-composer-footer-responsive][data-composer-layout="single-line"]';
+  questionStyle.textContent=`
+    ${questionFooter}:not([data-dictation-view="waveform"]){
+      grid-template-columns:minmax(0,auto) auto minmax(0,1fr);grid-template-rows:auto auto;gap:0 5px;
+      padding:0 calc(var(--spacing) * 2);margin-bottom:var(--spacing-composer-footer-bottom);
+    }
+    ${questionFooter}:not([data-dictation-view="waveform"]) > :not([data-composer-leading-controls],[data-composer-trailing-controls],[data-composer-expansion-control])[data-composer-layout]{
+      grid-area:1 / 1 / 2 / -1;min-width:0;justify-self:stretch;margin-inline:calc(var(--spacing) * -2);
+    }
+    ${questionFooter}:not([data-dictation-view="waveform"]) > [data-composer-leading-controls]{grid-area:2 / 1}
+    ${questionFooter}:not([data-dictation-view="waveform"]) > [data-composer-trailing-controls]{grid-area:2 / 3}
+    ${questionRoot} [data-composer-surface-variant][data-composer-layout="single-line"]{
+      border-radius:var(--composer-border-radius,22px);
+    }
+    ${questionRoot} [data-composer-body][data-composer-layout="single-line"]{
+      border-radius:inherit;
+    }
+    ${questionRoot} [data-composer-body][data-composer-layout="single-line"] > [data-composer-attachments]:not([data-visible-attachments]),
+    ${questionRoot} [data-composer-body][data-composer-layout="single-line"]:not(:has(> [data-composer-attachments]))::before{
+      content:"";padding:var(--padding-composer-empty-attachments);
+    }
+    ${questionFooter} [data-composer-input][data-composer-layout="single-line"]{
+      padding:0;margin:0 0 var(--spacing-composer-input-footer);
+    }
+    ${questionFooter} [data-composer-input-layout="single-line"]{
+      display:grid;grid-template-rows:minmax(max(2lh,var(--composer-editor-min-height,0px)),auto);
+      box-sizing:content-box;height:auto;margin:0;padding:var(--padding-composer-input);overflow:auto;
+      max-height:min(25dvh,var(--composer-editor-max-height,25dvh));line-height:var(--composer-editor-line-height,1.35);
+    }
+    ${questionFooter} [data-composer-input-layout="single-line"] > [contenteditable="true"]{
+      height:auto!important;min-height:var(--composer-editor-min-height,2.5rem)!important;
+      padding:0;overflow:visible;white-space:break-spaces;overflow-wrap:anywhere;
+    }
+    /* As in the multiline editor, the scroll container clips the text and
+       decorations together. Its individual children do not clip each other. */
+    ${questionFooter} [data-composer-input-layout="single-line"] > *{overflow:visible}`;
+  document.head.append(questionStyle);
   const panels={
     error:'请求状态',speed:'输出与首字等待', context:'上下文占用', quota:'账户剩余额度'
+  };
+  const contentKinds={
+    results:['工具结果','#82a6d9'],calls:['工具调用','#da9b61'],
+    instructions:['系统与开发者指令','#ad92d4'],user:['用户文字','#6eb7a0'],
+    tools:['工具定义','#d8bc67'],assistant:['助手正文','#66aec8'],
+    reason:['可见推理摘要','#cf88ab'],summary:['压缩摘要','#afba82'],
+    other:['其他文字','#c19481'],unclassified:['未归类','#999eab']
   };
   let root,footer,host,shadow,pop,observer,sizing,strip,id='',latest,active='',signature='',sizeMode='',pinned=false,hideTimer;
   const buttons={};
@@ -136,26 +185,44 @@
       pop.append(element('strong','heading cache','缓存命中 '+(c.cacheRate==null?'—':num(c.cacheRate)+'%')));
       const usage=element('div','ctx-usage');
       usage.append(element('b','',num(c.percent)+'% 已用'),element('span','',kilo(c.used)+' / '+kilo(c.max)));
-      const bar=element('div','ctx-bar'),fill=element('i','');fill.style.width=c.percent+'%';bar.append(fill);
+      const bar=element('div','ctx-bar'),fill=element('div','ctx-fill');
+      fill.style.width=Math.min(100,100*c.used/c.max)+'%';bar.append(fill);
+      bar.setAttribute('role','img');
+      const remaining='剩余 '+kilo(Math.max(0,c.max-c.used));
+      const barLabel=num(c.percent)+'% 已用，'+remaining;
+      bar.setAttribute('aria-label',barLabel);bar.title=barLabel;
       pop.append(usage,bar);
-      pop.append(element('strong','composition-title','内容构成'));
+      pop.append(element('strong','composition-title','已用内容构成'));
       const content=v.composition;
       if(!content){pop.append(element('div','stat-label','正在读取本地可识别内容…'));return}
-      const labels={user:'用户文字',instructions:'系统与开发者指令',assistant:'助手正文',calls:'工具调用',results:'工具结果',tools:'工具定义',reason:'可见推理摘要',summary:'压缩摘要',other:'其他文字'};
       const table=element('div','breakdown');
       const values=Object.entries(content.text).filter(([,n])=>n>0).sort((a,b)=>b[1]-a[1]);
-      const largest=values[0]?.[1]||1;
+      const estimated=values.reduce((sum,[,n])=>sum+n,0);
+      if(c.used>estimated)values.push(['unclassified',c.used-estimated]);
+      const total=Math.max(c.used,estimated),stops=[];
+      let cumulative=0;
       for(const [key,n] of values){
-        const track=element('i','track'),fill=element('i','');fill.style.width=(n/largest*100)+'%';track.append(fill);
-        table.append(element('span','',labels[key]||'其他文字'),track,element('b','',kilo(n)));
+        const [label,color]=contentKinds[key]||contentKinds.other;
+        const start=cumulative/total*100;
+        cumulative+=n;stops.push(color+' '+start+'% '+(cumulative/total*100)+'%');
+        const entry=element('div','ctx-entry');
+        entry.title=label+' · 约占 '+num(100*n/total)+'%';
+        entry.style.setProperty('--key-color',color);
+        entry.append(element('span','',label),element('b','',kilo(n)));table.append(entry);
       }
-      pop.append(table);
-      const media=['图片 '+content.images+' 张'];
+      const layout=element('div','composition-layout');layout.append(table);
+      if(stops.length&&c.used>0){
+        const pie=element('div','ctx-pie');pie.style.background='conic-gradient('+stops.join(',')+')';
+        pie.setAttribute('aria-hidden','true');pie.title='已用内容构成（估算）';layout.append(pie);
+      }
+      pop.append(layout);
+      const media=['当前记录图片 '+content.images+' 张'];
       if(content.files)media.push('文件 '+content.files+' 个');
       if(content.audio)media.push('音频 '+content.audio+' 段');
       pop.append(element('div','attachments',media.join(' · ')));
-      const note='文字按 o200k_base 估算；图片按条目计数。';
-      pop.append(element('div','stat-label',note+(content.opaque?'加密部分未计入。':'')+(content.partial||content.unknown?'仅含可识别记录。':'')));
+      pop.append(element('div','stat-label',remaining+'。文字按 o200k_base 估算。'+
+        (estimated>c.used?'文字估算超过已用量，扇形按各项估算占比分配。':c.used>estimated?'未归类为已用量减去可识别文字的估算差额，含图片等内容。':'')+
+        (content.partial?'本地记录不完整。':'')));
       return;
     }
   }
@@ -202,6 +269,12 @@
     const leftRects=rects(leading),rightRects=rects(trailing);
     if(!leftRects.length||!rightRects.length){strip.style.visibility='hidden';closeDetail();return}
     const box=footer.getBoundingClientRect();
+    // While React is swapping layouts, never put the strip on top of the input.
+    const editor=footer.querySelector('[data-composer-input]');
+    const inputBox=editor?.getBoundingClientRect(),mid=leftRects[0].top+leftRects[0].height/2;
+    if(inputBox?.height>0&&mid>=inputBox.top&&mid<inputBox.bottom){
+      strip.style.visibility='hidden';closeDetail();return;
+    }
     const start=Math.max(box.left,...leftRects.map(r=>r.right))+4;
     const end=Math.min(box.right,...rightRects.map(r=>r.left))-4;
     const space=Math.max(0,Math.floor(end-start));
@@ -216,8 +289,14 @@
     if(active)place();
   }
   function scheduleFit(){if(!layoutFrame)layoutFrame=requestAnimationFrame(()=>{layoutFrame=0;fit()})}
+  function updateQuestionLayout(){
+    if(!root||!footer)return;
+    const open=root.dataset.composerPlacement==='thread'&&footer.dataset.composerLayout==='single-line'&&
+      footer.dataset.dictationView!=='waveform'&&!!root.querySelector(requestCard);
+    root.toggleAttribute('data-codex-capsule-question',open);
+  }
   function mount(f){
-    closeDetail();sizing?.disconnect();toolbarWatch?.disconnect();host?.remove();
+    closeDetail();sizing?.disconnect();toolbarWatch?.disconnect();host?.remove();root?.removeAttribute('data-codex-capsule-question');
     footer=f;root=f.closest('[data-composer-placement]');
     host=document.createElement('div');host.dataset.codexCapsule='';
     host.style.cssText='position:relative;display:block;align-self:center;flex:0 0 0;width:0;height:0;min-width:0;box-sizing:border-box';
@@ -253,12 +332,16 @@
       .speed-value b{font-size:18px;line-height:1.35;font-weight:650}.panel-title{margin-bottom:8px}
       .panel-title:has(+.speed-hint){margin-bottom:2px}.speed-hint{margin-bottom:8px}
       [popover]{max-height:calc(100vh - 35px);overflow-y:auto}
-      .composition-title{display:block;margin:10px 0 5px;font-size:13px}.breakdown{display:grid;grid-template-columns:max-content minmax(42px,1fr) max-content;align-items:center;gap:3px 8px;font-size:11px}.breakdown b{text-align:end;font-variant-numeric:tabular-nums}
-      .track{background:color-mix(in srgb,currentColor 10%,transparent);border-radius:4px}.track i{display:block;height:4px;border-radius:4px;background:#88a9df}
+      .composition-title{display:block;margin:10px 0 5px;font-size:13px}.breakdown{display:grid;gap:2px;font-size:11px}
+      .composition-layout{display:flex;align-items:center;gap:14px}.breakdown{flex:1;min-width:0}
+      .ctx-pie{width:clamp(52px,16vw,90px);aspect-ratio:1;flex:none;border-radius:50%}
+      .ctx-entry{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:7px}
+      .ctx-entry::before{content:"";width:8px;height:8px;border-radius:2px;background:var(--key-color)}
+      .ctx-entry b{font-variant-numeric:tabular-nums}
       .attachments,.balance{margin:5px 0;font-size:12px}
       .ctx-usage{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}.ctx-usage span{opacity:.8}
-      .ctx-bar{display:flex;overflow:hidden;height:5px;border-radius:5px;background:color-mix(in srgb,currentColor 12%,transparent);margin:8px 0 10px}
-      .ctx-bar i{background:#82a6d9}
+      .ctx-bar{display:flex;overflow:hidden;height:7px;border-radius:5px;background:color-mix(in srgb,currentColor 12%,transparent);margin:8px 0 10px}
+      .ctx-fill{background:#82a6d9}
     `;
     strip=document.createElement('div');strip.className='strip';strip.setAttribute('role','group');strip.setAttribute('aria-label','Codex Capsule');
     for(const [k,label] of Object.entries(panels)){
@@ -274,17 +357,22 @@
     if(!leading)return;
     shadow.append(style,strip,pop);leading.append(host);id='';signature='';draw(null);
     sizing=new ResizeObserver(fit);sizing.observe(f);sizing.observe(leading);
+    const input=f.querySelector('[data-composer-input]');if(input)sizing.observe(input);
     const trailing=f.querySelector('[data-composer-trailing-controls]');if(trailing)sizing.observe(trailing);
-    toolbarWatch=new MutationObserver(scheduleFit);
+    toolbarWatch=new MutationObserver(records=>{
+      if(records.some(r=>r.target===f))updateQuestionLayout();
+      scheduleFit();
+    });
+    toolbarWatch.observe(f,{attributes:true,attributeFilter:['data-composer-layout','data-composer-rows','data-dictation-view']});
     for(const group of [leading.parentElement,trailing])if(group)toolbarWatch.observe(group,{
       subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden']
     });
-    fit();
+    updateQuestionLayout();fit();
   }
   function sync(){
     if(!alive(footer)||!host?.isConnected){
       const f=[...document.querySelectorAll(':is([data-composer-placement="thread"],[data-composer-placement="home"]) [data-composer-footer-responsive]')].find(alive);
-      if(!f){sizing?.disconnect();toolbarWatch?.disconnect();closeDetail();host?.remove();host=null;root=null;footer=null;id='';return ''}
+      if(!f){sizing?.disconnect();toolbarWatch?.disconnect();closeDetail();host?.remove();root?.removeAttribute('data-codex-capsule-question');host=null;root=null;footer=null;id='';return ''}
       mount(f);
     }
     const next=identity();
@@ -295,8 +383,20 @@
   // reader also rechecks the identity before delivering any asynchronous result.
   observer=new MutationObserver(records=>{
     if(!host)return;
-    if(!host.isConnected||!root?.isConnected||records.some(r=>
-      r.type==='attributes'||(root.contains(r.target)&&!r.target.closest('[contenteditable="true"]')&&r.target!==host)))sync();
+    if(!host.isConnected||!root?.isConnected){sync();return}
+    const marker='['+idAttr+']';
+    // Caret paint and typing also mutate the composer. Neither can change
+    // the conversation ID. Only look for a new/removed identity outside the editor.
+    for(const record of records){
+      if(!root.contains(record.target))continue;
+      if(record.type==='attributes'){sync();return}
+      if(footer.contains(record.target))continue;
+      for(const node of [...record.addedNodes,...record.removedNodes]){
+        if(node.nodeType!==1)continue;
+        if(footer.dataset.composerLayout==='single-line'&&(node.matches(requestCard)||node.querySelector(requestCard)))updateQuestionLayout();
+        if(node.matches(marker)||node.querySelector(marker)){sync();return}
+      }
+    }
   });
   observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:[idAttr]});
   const reposition=()=>{if(active)place()};
@@ -319,7 +419,7 @@
       return true;
     },
     dispose(){observer.disconnect();window.removeEventListener('resize',reposition);window.removeEventListener('scroll',reposition,true);
-      sizing?.disconnect();toolbarWatch?.disconnect();cancelAnimationFrame(layoutFrame);closeDetail();host?.remove();delete window[key]}
+      sizing?.disconnect();toolbarWatch?.disconnect();cancelAnimationFrame(layoutFrame);closeDetail();host?.remove();root?.removeAttribute('data-codex-capsule-question');questionStyle.remove();delete window[key]}
   };
   return true;
 })();

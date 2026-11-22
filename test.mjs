@@ -60,8 +60,11 @@ test('content counts the last checkpoint, images once and appended records only'
   try{
     await fs.writeFile(file,rec('response_item',user)+rec('compacted',{replacement_history:[user]})+rec('response_item',{type:'reasoning',encrypted_content:'hidden'}));
     const a=await scanContent(file);assert.equal(a.stats.images,1);assert.equal(a.stats.text.user,1);assert.equal(a.stats.opaque,1);
-    await fs.appendFile(file,rec('response_item',{type:'function_call_output',output:[{type:'input_text',text:'hello'},{type:'input_file'}]}));
-    const b=await scanContent(file,a);assert.equal(b.stats.images,1);assert.equal(b.stats.text.results,1);assert.equal(b.stats.files,1);
+    await fs.appendFile(file,rec('response_item',user)+rec('response_item',{type:'function_call_output',output:[{type:'input_text',text:'hello'},{type:'input_file'}]}));
+    const b=await scanContent(file,a);assert.equal(b.stats.images,2);assert.equal(b.stats.text.results,1);assert.equal(b.stats.files,1);
+    await fs.appendFile(file,rec('compacted',{replacement_history:[user]}));
+    assert.equal((await scanContent(file,b)).stats.images,1);
+    assert.equal((await scanContent(file)).stats.images,1);
   }finally{await fs.unlink(file);await fs.rmdir(dir)}
 });
 test('context breakdown is additive and missing fields stay unknown',()=>{
