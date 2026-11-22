@@ -7,6 +7,62 @@ import {DatabaseSync} from 'node:sqlite';
 import {scanContent} from './content.mjs';
 import {quotaView,summarizeRecord,retryDiagnostic,explainFailure,contextUsage,StreamRate,LocalMetrics} from './metrics.mjs';
 const windows=[{minutes:300,remaining:42,reset:3000},{minutes:10080,remaining:68,reset:9000}];
+test('parallel and reused agent turns count once under their root, including split writes',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'capsule-agents-'));
+  const uuid=n=>'a0000000-0000-4000-8000-'+String(n).padStart(12,'0');
+  const [parent,root,a,b,t1,t2,t3,other]=Array.from({length:8},(_,i)=>uuid(i+1));
+  const db=new DatabaseSync(path.join(dir,'thread_history_1.sqlite'));
+  const file=id=>path.join(dir,id+'.jsonl');
+  const rec=(second,type,payload)=>JSON.stringify({timestamp:new Date(second*1000).toISOString(),type,payload})+'\n';
+  const usage=(agent,turn,total,r=root)=>rec(108,'token_usage_record',{thread_id:agent,turn_id:turn,root_turn_id:r,turn_token_usage:{output_tokens:total}});
+  try{
+    db.exec('CREATE TABLE thread_turns(thread_id,turn_id,root_turn_id,rollout_byte_offset,rollout_end_byte_offset)');
+    const add=db.prepare('INSERT INTO thread_turns VALUES(?,?,?,?,?)');
+    const lines=usage(a,t1,30)+usage(a,t1,30)+usage(a,t1,999,other)+usage(b,t1,999);
+    await fs.writeFile(file(a),lines+usage(a,t3,15));
+    add.run(a,t1,root,0,lines.length);add.run(a,t3,root,lines.length,(await fs.stat(file(a))).size);
+    const split=usage(b,t2,50);await fs.writeFile(file(b),split.slice(0,-4));add.run(b,t2,root,0,null);
+    await fs.writeFile(file(parent),rec(100,'event_msg',{type:'task_started',turn_id:root})+
+      rec(101,'event_msg',{type:'item_completed',thread_id:parent,turn_id:root,item:{type:'SubAgentActivity',agent_thread_id:a}})+
+      rec(109,'event_msg',{type:'token_count',info:{total_token_usage:{output_tokens:100},last_token_usage:{output_tokens:100}}})+
+      rec(110,'event_msg',{type:'task_complete',turn_id:root}));
+    const m=new LocalMetrics(dir,dir);m.logPath=async id=>file(id);
+    assert.equal((await m.read(parent)).turnOutput,145);
+    await fs.appendFile(file(b),split.slice(-4));
+    db.prepare('UPDATE thread_turns SET rollout_end_byte_offset=? WHERE thread_id=?').run(split.length,b);
+    m.entries.get(parent).family.next=0;
+    const both=await m.read(parent);
+    assert.equal(both.agentCount,2);assert.equal(both.agentOutput,95);
+    assert.equal(both.speed.tps,19.5);assert.equal((await m.read(parent)).turnOutput,195);
+    await fs.appendFile(file(parent),rec(120,'event_msg',{type:'task_started',turn_id:other}));
+    assert.equal((await m.read(parent)).agentCount,0);
+  }finally{db.close();await fs.rm(dir,{recursive:true,force:true})}
+});
+test('an open chat follows its indexed rollout segment without mixing another thread',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'capsule-segment-'));
+  const id='a0000000-0000-4000-8000-000000000001',segment='b0000000-0000-4000-8000-000000000002';
+  const sessions=path.join(dir,'sessions'),prefix=path.join(sessions,'rollout-2026-11-23T01-23-08-');
+  const original=prefix+id+'.jsonl',next=prefix+id+'_'+segment+'.jsonl';
+  const db=new DatabaseSync(path.join(dir,'state_5.sqlite'));
+  const row=(type,body)=>JSON.stringify({timestamp:'2026-11-22T17:30:17Z',type:'event_msg',payload:{type,...body}})+'\n';
+  try{
+    await fs.mkdir(sessions);
+    await fs.writeFile(original,row('task_started',{turn_id:'previous'}));
+    await fs.writeFile(next,row('task_started',{turn_id:'current'})+row('token_count',{info:{total_token_usage:{output_tokens:999},last_token_usage:{output_tokens:42}}}));
+    db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT)');
+    const put=db.prepare('INSERT OR REPLACE INTO threads VALUES(?,?)');
+    put.run(id,original);
+    const reader=new LocalMetrics(dir,dir);
+    assert.equal((await reader.session(id)).turn,'previous');
+    put.run(id,next);
+    assert.equal((await reader.logPath(id)),await fs.realpath(next));
+    reader.entries.get(id).nextPathCheck=0;
+    const current=await reader.session(id);
+    assert.equal(current.turn,'current');assert.equal(current.turnOutput,42);
+    put.run(segment,next);
+    assert.equal(await reader.logPath(segment),null);
+  }finally{db.close();await fs.rm(dir,{recursive:true,force:true})}
+});
 test('whole-turn output survives restart beyond the normal log tail; duplicates, tools and other turns do not inflate it',async()=>{
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'capsule-output-')),file=path.join(dir,'test.jsonl');
   const id='a0000000-0000-4000-8000-000000000001';

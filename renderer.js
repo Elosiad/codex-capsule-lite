@@ -184,7 +184,7 @@
       if(hint)pop.append(element('div','stat-label speed-hint',hint));
       const grid=element('div','speed-grid');
       const measures=[
-        [s?.kind==='toolPending'?'工具参数生成中':s?.kind==='tool'?'工具参数平均速度':s?.live?'近 3 秒速度':'片段平均速度',s?.kind==='toolPending'?num(s.ms/1000):s?speedNumber(s):'—',s?.kind==='toolPending'?'秒':s?'tokens/秒':'',buttons.speed.style.getPropertyValue('--ink')],
+        [s?.kind==='family'?'本轮合计均速':s?.kind==='toolPending'?'工具参数生成中':s?.kind==='tool'?'工具参数平均速度':s?.live?'近 3 秒速度':'片段平均速度',s?.kind==='toolPending'?num(s.ms/1000):s?speedNumber(s):'—',s?.kind==='toolPending'?'秒':s?'tokens/秒':'',buttons.speed.style.getPropertyValue('--ink')],
         ['首次响应',v.ttft!=null?waitNumber(v,v.ttft):'—',v.ttft!=null?'秒':'','#88a9df']
       ];
       for(const [label,amount,unit,color] of measures){
@@ -196,13 +196,14 @@
         if(label==='首次响应')col.title=hint||'等待首段可见思考摘要或助手正文。';
         grid.append(col);
       }
-      const caption=s?.kind==='toolPending'?'等待完整工具参数落盘后计算速度':
+      const caption=s?.kind==='family'?'主对话 '+(v.ownOutput==null?'待记录':num(v.ownOutput))+' · '+num(v.agentCount)+' 个子代理 '+num(v.agentOutput)+' tokens':
+        s?.kind==='toolPending'?'等待完整工具参数落盘后计算速度':
         s?.kind==='tool'?'工具参数约 '+num(s.tokens)+' tokens · 生成约 '+num(s.ms/1000)+' 秒':
         s?.live?'采样 '+num(s.ms/1000)+' 秒 · 约 '+num(s.tokens)+' tokens':
         s?'本段 '+num(s.tokens)+' tokens · 耗时 '+num(s.ms/1000)+' 秒 · '+num(s.tps)+' tokens/秒':'等待可计时的正文片段';
       const total=element('div','turn-output');
       total.append(element('span','','本轮累计输出'),element('b','',v.turnOutput==null?'待记录':num(v.turnOutput)+' tokens'));
-      total.title='当前聊天本轮各次模型请求已记录的输出，含工具调用与推理；每次用量落盘后更新。';
+      total.title=s?.kind==='family'?'主对话和归属本轮的子代理已记录输出之和。合计均速按本轮实际经过时间计算，每 3 秒刷新。':'当前聊天本轮各次模型请求已记录的输出，含工具调用与推理；每次用量落盘后更新。';
       pop.append(grid,total,element('div','stamp',caption));
       return;
     }else if(active==='context'){
@@ -276,7 +277,7 @@
     }else if(active==='error')closeDetail();
     const short=sizeMode!=='full';
     const speedLabel=s?.kind==='toolPending'?'工具生成 '+num(s.ms/1000)+'s':
-      (s?.kind==='tool'?'工具 ':'')+(s?speedNumber(s):'—')+' tok/s';
+      (s?.kind==='family'?'合计 ':s?.kind==='tool'?'工具 ':'')+(s?speedNumber(s):'—')+' tok/s';
     buttons.speed.textContent=speedLabel+' · 响应 '+(t!=null?waitNumber(value,t)+'s':'—');
     buttons.context.textContent=(short?'窗 ':'上下文 ')+(c?num(c.percent)+'%':'—');
     const quotaLabels=w.map(a=>(a.minutes===300?'5h额度 ':'周额度 ')+(a.remaining==null?'—':num(a.remaining)+'%'));

@@ -63,7 +63,7 @@ try{
         active=true;
         const data=await metrics.read(id,await c.evaluate(api+"?.wantsContent?.()===true"));
         c.streamRate??=new StreamRate();
-        const sample=data.running&&data.turn?await c.evaluate(api+'?.streamSample?.('+[id,data.turn,data.finishedItem,data.sentAt].map(x=>JSON.stringify(x)).join(',')+')'):null;
+        const sample=data.speed?.kind!=='family'&&data.running&&data.turn?await c.evaluate(api+'?.streamSample?.('+[id,data.turn,data.finishedItem,data.sentAt].map(x=>JSON.stringify(x)).join(',')+')'):null;
         if(data.sentAt&&(data.running||data.ttftSource==='summary')){
           const wait=await c.evaluate(api+'?.observedWait?.('+[id,data.turn,data.sentAt].map(x=>JSON.stringify(x)).join(',')+')');
           if(Number.isFinite(wait?.ms)&&(data.ttft==null||

@@ -117,6 +117,7 @@ export function summarizeRecord(state, rec, id) {
       state.ttft=null;
       state.ttftSource=null;state.sentAt=null;state.firstTextSeen=false;
       state.running=true;
+      state.hasAgents=false;state.endedAt=null;
       state.startedAt=at;state.progressAt=0;state.failure=null;
       break;
     case 'stream_error':
@@ -130,16 +131,20 @@ export function summarizeRecord(state, rec, id) {
     case 'task_complete':
       if(state.turn && e.turn_id && state.turn!==e.turn_id)return;
       state.running=false;
+      state.endedAt=at;
       if(state.failure?.phase==='retry'||(state.failure?.at&&state.progressAt>state.failure.at))state.failure=null;
       if(state.ttft==null&&positive(e.time_to_first_token_ms)){
         state.ttft=e.time_to_first_token_ms;state.ttftSource='official';
       }
       break;
     case 'turn_aborted':
-      if(!state.turn||!e.turn_id||state.turn===e.turn_id){state.running=false;state.failure=null}
+      if(!state.turn||!e.turn_id||state.turn===e.turn_id){state.running=false;state.endedAt=at;state.failure=null}
       break;
     case 'item_completed': {
       if(state.turn&&e.turn_id&&e.turn_id!==state.turn)return;
+      if(e.item?.type==='SubAgentActivity'&&threadId.test(e.item.agent_thread_id)){
+        state.hasAgents=true;return;
+      }
       if(e.item?.type==='UserMessage'){
         if(state.turn&&state.running&&!state.sentAt&&!state.firstTextSeen&&positive(e.started_at_ms))state.sentAt=e.started_at_ms;
         return;
@@ -256,6 +261,83 @@ export class LocalMetrics {
     this.entries=new Map();
     this.content=new ContentReader();
   }
+  // Read only complete usage rows within the child's indexed turn boundaries.
+  // The file can contain a copy of its parent's history. Check all three IDs.
+  async childUsage(row,root,cache){
+    const child=row.thread_id,turn=row.turn_id;
+    let cursor=cache.get(turn);
+    if(cursor?.done&&row.rollout_end_byte_offset===cursor.offset)return cursor;
+    const file=await this.logPath(child);
+    if(!file)return cursor;
+    const fd=await fs.open(file,'r');
+    try{
+      const size=(await fd.stat()).size;
+      const end=Math.min(size,row.rollout_end_byte_offset??size);
+      if(!cursor||cursor.file!==file||end<cursor.offset){
+        cursor={file,offset:row.rollout_byte_offset,tokens:cursor?.tokens??0,at:cursor?.at??0};
+        cache.set(turn,cursor);
+      }
+      if(end<=cursor.offset)return cursor;
+      const block=Buffer.allocUnsafe(Math.min(65536,end-cursor.offset));
+      let pos=cursor.offset,partial=cursor.partial??Buffer.alloc(0),skip=cursor.skip??false;
+      while(pos<end){
+        const {bytesRead}=await fd.read(block,0,Math.min(block.length,end-pos),pos);
+        if(!bytesRead)break;
+        let i=0;
+        while(i<bytesRead){
+          const newline=block.subarray(0,bytesRead).indexOf(10,i);
+          const boundary=newline<0?bytesRead:newline;
+          if(!skip){
+            if(partial.length+boundary-i>16384)skip=true;
+            else partial=Buffer.concat([partial,block.subarray(i,boundary)]);
+          }
+          if(newline<0)break;
+          if(!skip&&partial.subarray(0,160).includes('"type":"token_usage_record"')){
+            let r;try{r=JSON.parse(partial.toString())}catch{}
+            const u=r?.payload,t=count(u?.turn_token_usage?.output_tokens);
+            if(t!=null&&u.thread_id===child&&u.turn_id===turn&&u.root_turn_id===root){
+              cursor.tokens=Math.max(cursor.tokens,t);
+              cursor.at=Math.max(cursor.at,Date.parse(r.timestamp)||0);
+            }
+          }
+          partial=Buffer.alloc(0);skip=false;i=newline+1;
+        }
+        pos+=bytesRead;
+      }
+      cursor.offset=pos;cursor.partial=partial;cursor.skip=skip;
+      cursor.done=row.rollout_end_byte_offset!=null&&pos===row.rollout_end_byte_offset&&!partial.length&&!skip;
+      return cursor;
+    }finally{await fd.close()}
+  }
+  async agentTotals(id,s,entry){
+    if(!s.hasAgents||!threadId.test(s.turn)||!entry)return null;
+    if(entry.family?.turn!==s.turn)entry.family={turn:s.turn,cache:new Map(),next:0};
+    const family=entry.family,now=Date.now();
+    if(now<family.next)return family.value;
+    family.next=now+3000;
+    try{
+      if(!this.historyFile){
+        const files=(await fs.readdir(this.home)).filter(n=>/^thread_history_\d+\.sqlite$/.test(n));
+        this.historyFile=files.sort((a,b)=>parseInt(b.slice(15))-parseInt(a.slice(15)))[0];
+      }
+      if(!this.historyFile)return null;
+      const db=new DatabaseSync(path.join(this.home,this.historyFile),{readOnly:true,timeout:100});
+      let rows;
+      try{rows=db.prepare('SELECT thread_id,turn_id,rollout_byte_offset,rollout_end_byte_offset FROM thread_turns WHERE root_turn_id=? AND thread_id<>? AND rollout_byte_offset IS NOT NULL').all(s.turn,id)}finally{db.close()}
+      let tokens=0,latest=0,ongoing=false;
+      const children=new Set();
+      for(const row of rows){
+        if(!threadId.test(row.thread_id)||!threadId.test(row.turn_id)||row.rollout_byte_offset<0)continue;
+        let sample;
+        try{sample=await this.childUsage(row,s.turn,family.cache)}catch{sample=family.cache.get(row.turn_id)}
+        if(!sample?.at)continue;
+        children.add(row.thread_id);tokens+=sample.tokens;latest=Math.max(latest,sample.at);
+        if(row.rollout_end_byte_offset==null)ongoing=true;
+      }
+      family.value=children.size?{children:children.size,tokens,end:s.running||ongoing?now:Math.max(s.endedAt||0,latest)}:null;
+    }catch{this.historyFile=null}
+    return family.value;
+  }
   async logPath(id){
     const names=(await fs.readdir(this.home)).filter(n=>/^state_\d+\.sqlite$/.test(n))
       .sort((a,b)=>parseInt(b.slice(6))-parseInt(a.slice(6)));
@@ -266,17 +348,23 @@ export class LocalMetrics {
     if(!row?.rollout_path)return null;
     const file=await fs.realpath(row.rollout_path);
     const rel=path.relative(await fs.realpath(this.home),file);
-    if(!/^(sessions|archived_sessions)[\\/]/i.test(rel)||!path.basename(file).toLowerCase().endsWith(id.toLowerCase()+'.jsonl'))return null;
+    if(!/^(sessions|archived_sessions)[\\/]/i.test(rel)||path.extname(file).toLowerCase()!=='.jsonl')return null;
+    const [stem,segment,...extra]=path.parse(file).name.toLowerCase().split('_');
+    if(!stem.endsWith('-'+id.toLowerCase())||extra.length||(segment!==undefined&&!threadId.test(segment)))return null;
     return file;
   }
   async session(id){
     if(!threadId.test(id))return {};
     let entry=this.entries.get(id);
-    if(!entry){
-      const file=await this.logPath(id);if(!file)return {};
-      entry={file,offset:0,partial:Buffer.alloc(0),skip:false,state:{}};
-      if(this.entries.size>=12)this.entries.delete(this.entries.keys().next().value);
-      this.entries.set(id,entry);
+    if(!entry||Date.now()>=entry.nextPathCheck){
+      const file=await this.logPath(id);
+      if(!file){this.entries.delete(id);return {}}
+      if(file!==entry?.file){
+        if(!entry&&this.entries.size>=12)this.entries.delete(this.entries.keys().next().value);
+        entry={file,offset:0,partial:Buffer.alloc(0),skip:false,state:{}};
+        this.entries.set(id,entry);
+      }
+      entry.nextPathCheck=Date.now()+5000;
     }
     const fd=await fs.open(entry.file,'r');
     try{
@@ -338,7 +426,14 @@ export class LocalMetrics {
     }else if(entry)entry.toolDisplay=null;
     const failure=s.failure && (!retry||s.failure.at>=retry.at||s.failure.phase==='failed')?s.failure:retry;
     const composition=wantContent?await this.content.get(this.entries.get(id)?.file):null;
-    return {speed,turn:s.turn??null,turnOutput:s.turnOutput??null,sentAt:s.sentAt??null,finishedItem:s.finishedItem??null,ttft:s.ttft??null,ttftSource:s.ttftSource??null,running:s.running===true,context:s.context??null,composition,quota:quotaView(q),failure};
+    const agents=await this.agentTotals(id,s,entry);
+    const ownOutput=s.turnOutput??null;
+    const turnOutput=agents?(ownOutput??0)+agents.tokens:ownOutput;
+    if(agents&&agents.end>s.startedAt){
+      const ms=agents.end-s.startedAt;
+      speed={kind:'family',tokens:turnOutput,ms,tps:1000*turnOutput/ms};
+    }
+    return {speed,turn:s.turn??null,turnOutput,ownOutput,agentOutput:agents?.tokens??null,agentCount:agents?.children??0,sentAt:s.sentAt??null,finishedItem:s.finishedItem??null,ttft:s.ttft??null,ttftSource:s.ttftSource??null,running:s.running===true,context:s.context??null,composition,quota:quotaView(q),failure};
   }
   async retry(id,s){
     const entry=this.entries.get(id);
