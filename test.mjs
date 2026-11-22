@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import {DatabaseSync} from 'node:sqlite';
 import {scanContent} from './content.mjs';
 import {quotaView,summarizeRecord,retryDiagnostic,explainFailure,contextUsage,StreamRate,LocalMetrics} from './metrics.mjs';
 const windows=[{minutes:300,remaining:42,reset:3000},{minutes:10080,remaining:68,reset:9000}];
@@ -95,6 +96,40 @@ test('stream wrapper respects the specific cause, retry count and turn identity'
   assert.equal(explainFailure('HTTP 429','failed',12).title,'请求受限');
   assert.equal(explainFailure('HTTP 429 insufficient_quota','failed',12).title,'额度已用尽');
   assert.equal(explainFailure('unknown response with private user text','failed',12).technical,'');
+});
+test('wrapped transport causes take priority and reconnect wording follows the phase',()=>{
+  const wrapper='stream disconnected before completion: ';
+  const limit='Responses websocket connection limit reached (60 minutes)';
+  const retry=explainFailure(wrapper+limit+'. Create a new websocket connection to continue.','retry',1);
+  assert.equal(retry.summary,'连接已满 60 分钟，Codex 正在自动重连');
+  assert.equal(retry.technical,limit);
+  const state={turn:'t'};
+  summarizeRecord(state,{type:'event_msg',payload:{type:'error',turn_id:'t',additionalDetails:limit}},'chat');
+  assert.equal(state.failure.phase,'failed');assert.equal(state.failure.title,retry.title);
+  assert.doesNotMatch(state.failure.summary,/正在自动重连/);
+  summarizeRecord(state,{type:'event_msg',payload:{type:'stream_error',turn_id:'t',will_retry:false,message:limit}},'chat');
+  assert.equal(state.failure.phase,'failed');assert.doesNotMatch(state.failure.summary,/正在自动重连/);
+  for(const [reason,title] of [['HTTP 502','服务端错误'],['HTTP 504','服务端错误'],['HTTP 503','服务繁忙'],['ECONNREFUSED','连接被拒绝'],['ENOTFOUND','域名解析失败'],['ETIMEDOUT','连接超时'],['HTTP 401','登录验证失败'],['HTTP 403','访问被拒绝'],['HTTP 429','请求受限'],['insufficient_quota','额度已用尽']]){
+    assert.equal(explainFailure(wrapper+reason,'retry',1).title,title,reason);
+  }
+  assert.match(explainFailure(wrapper+'unrecognized detail','retry',1).summary,/具体断点未知/);
+});
+test('long SQLite retry records retain the turn and cause without exposing raw details',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'capsule-retry-')),file=path.join(dir,'logs_2.sqlite');
+  const turn='10000000-0000-4000-8000-000000000001',time=Math.floor(Date.now()/1000);
+  try{
+    const db=new DatabaseSync(file);
+    try{
+      db.exec('CREATE TABLE logs(id INTEGER PRIMARY KEY,thread_id TEXT,ts INTEGER,ts_nanos INTEGER,target TEXT,feedback_log_body TEXT)');
+      const body='retrying sampling request (1/5 in 185ms)... turn_id='+turn+' retries=1 max_retries=5 sampling_error=stream disconnected before completion: Responses websocket connection limit reached (60 minutes). '+ 'private'.repeat(800);
+      db.prepare('INSERT INTO logs VALUES(1,?,?,0,?,?)').run('chat',time,'codex_core::responses_retry',body);
+    }finally{db.close()}
+    const m=new LocalMetrics(dir,dir);m.entries.set('chat',{});
+    const failure=await m.retry('chat',{turn,startedAt:time*1000});
+    assert.equal(failure?.summary,'连接已满 60 分钟，Codex 正在自动重连');
+    assert.equal(failure.attempt,'1/5');assert.equal(failure.retryAt,time*1000+185);
+    assert.doesNotMatch(JSON.stringify(failure),/private/);
+  }finally{await fs.unlink(file);await fs.rmdir(dir)}
 });
 test('retry clears on resumed output, a new turn or cancellation; terminal error is distinct',()=>{
   const s={},send=(type,data={})=>summarizeRecord(s,{type:'event_msg',timestamp:'2026-11-22T01:00:00Z',payload:{type,turn_id:'t',...data}},'A');

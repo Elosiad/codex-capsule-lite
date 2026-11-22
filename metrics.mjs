@@ -46,6 +46,7 @@ export function contextUsage(info){
 // Only return known protocol phrases and numeric codes to the renderer.
 // Arbitrary server messages can contain signed URLs, request headers or prompts.
 const reasons=[
+  [/Responses websocket connection limit reached \(60 minutes\)/i,'连接已满 60 分钟','当前 WebSocket 连接已达到 60 分钟时限。','连接已满 60 分钟，Codex 正在自动重连'],
   [/insufficient_quota|usage_limit_reached|usageLimitExceeded|quota exceeded|quota exhausted|usage limit (?:has been )?reached/i,'额度已用尽','服务报告可用额度已耗尽。请查看额度重置时间。'],
   [/model is at capacity|model is currently at capacity/i,'模型繁忙','所选模型暂时满载。'],
   [/server overloaded|serverOverloaded|service unavailable|\b503\b/i,'服务繁忙','服务端暂时无法接收请求，可稍后再试。'],
@@ -53,16 +54,18 @@ const reasons=[
   [/unauthorized|authentication failed|\b401\b/i,'登录验证失败','服务端拒绝了当前凭据，可检查 Codex 登录状态。'],
   [/forbidden|\b403\b/i,'访问被拒绝','服务端拒绝了此请求，请检查当前账号或模型权限。'],
   [/ETIMEDOUT|timed?\s*out|responseStreamTimeout/i,'连接超时','等待响应超过时限。'],
+  [/\bECONNREFUSED\b|connection refused/i,'连接被拒绝','建立连接时收到拒绝响应。'],
+  [/\b(?:ENOTFOUND|EAI_AGAIN)\b|dns (?:resolution|lookup) failed/i,'域名解析失败','客户端未能解析连接所需的域名。'],
+  [/\b50[024]\b|internal server error|internalServerError/i,'服务端错误','服务端处理请求时返回了错误。'],
   [/websocket closed by server before response\.completed|ECONNRESET|connection reset by peer|websocket closed|unexpected eof/i,'连接中断','回复传输提前结束，Codex 没有收到完整响应。'],
-  [/stream disconnected before completion|responseStreamDisconnected|httpConnectionFailed|responseStreamConnectionFailed/i,'连接中断','与服务的连接未能建立或维持，具体断点未知。'],
-  [/\b50[024]\b|internal server error|internalServerError/i,'服务端错误','服务端处理请求时返回了错误。']
+  [/stream disconnected before completion|responseStreamDisconnected|httpConnectionFailed|responseStreamConnectionFailed/i,'连接中断','与服务的连接未能建立或维持，具体断点未知。']
 ];
 
 export function explainFailure(text, phase, at, attempt){
-  const msg=String(text||'').slice(-4096);
-  for(const [pattern,title,summary] of reasons){
+  const msg=String(text||'');
+  for(const [pattern,title,summary,retrySummary] of reasons){
     const hit=msg.match(pattern);
-    if(hit)return {title,summary,technical:hit[0],phase,at,attempt};
+    if(hit)return {title,summary:phase==='retry'&&retrySummary?retrySummary:summary,technical:hit[0],phase,at,attempt};
   }
   return {title:'请求异常',summary:'Codex 报告了请求异常，当前记录未标明可确认的原因。',technical:'',phase,at,attempt};
 }
@@ -102,8 +105,8 @@ export function summarizeRecord(state, rec, id) {
     case 'error': {
       if(state.turn && e.turn_id && state.turn!==e.turn_id)return;
       const info=e.codex_error_info??e.codexErrorInfo;
-      const retry=e.type==='stream_error'||e.will_retry===true||e.willRetry===true;
-      state.failure=explainFailure([e.message,e.additional_details,JSON.stringify(info)].join(' '),retry?'retry':'failed',at);
+      const retry=e.will_retry??e.willRetry??(e.type==='stream_error');
+      state.failure=explainFailure([e.message,e.additional_details??e.additionalDetails,JSON.stringify(info)].join(' '),retry===true?'retry':'failed',at);
       break;
     }
     case 'task_complete':
@@ -313,9 +316,9 @@ export class LocalMetrics {
           const high=db.prepare('SELECT max(id) AS n FROM logs').get().n||0;
           if(high<(entry.lastLogId||0))entry.lastLogId=0;
           if(high!==(entry.lastLogId||0)){
-            const rows=db.prepare(`SELECT ts,ts_nanos,substr(feedback_log_body,-4096) AS body FROM logs
+            const rows=db.prepare(`SELECT ts,ts_nanos,feedback_log_body AS body FROM logs
               WHERE thread_id=? AND ts BETWEEN ? AND ? AND id>? AND id<=? AND target='codex_core::responses_retry'
-              ORDER BY ts DESC,ts_nanos DESC LIMIT 12`).all(id,Math.floor(s.startedAt/1000),Math.floor(Date.now()/1000),entry.lastLogId||0,high);
+              ORDER BY ts DESC,ts_nanos DESC LIMIT 12`).iterate(id,Math.floor(s.startedAt/1000),Math.floor(Date.now()/1000),entry.lastLogId||0,high);
             for(const row of rows){
             const at=row.ts*1000+Math.floor(row.ts_nanos/1e6);
             const candidate=retryDiagnostic(row.body,s.turn,at);
