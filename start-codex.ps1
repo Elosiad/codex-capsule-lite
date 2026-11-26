@@ -14,7 +14,7 @@ function Get-CapsuleDesktopExecutable {
 function Start-CapsuleDesktop($exe,$stateDir,$profileDir){
     $arguments=@('--remote-debugging-address=127.0.0.1','--remote-debugging-port=0')
     if($profileDir){$arguments+=('--user-data-dir="'+$profileDir+'"')}
-    $child=Start-Process -FilePath $exe -ArgumentList $arguments -PassThru
+    $child=Start-Process -FilePath $exe -ArgumentList $arguments -WindowStyle Normal -PassThru
     for($i=0;$i -lt 40;$i++){
         if($child.HasExited){throw 'Codex returned to an existing instance. Fully quit Codex, then use Codex Capsule again.'}
         $ports=Get-NetTCPConnection -OwningProcess $child.Id -State Listen -ErrorAction SilentlyContinue
@@ -43,12 +43,12 @@ if($MyInvocation.InvocationName -ne '.'){
         $launcher=Join-Path $dir 'launch.vbs'
         if(Test-Path -LiteralPath $launcher){Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\wscript.exe') -ArgumentList ('"'+$launcher+'"') -WindowStyle Hidden}
         if($running){
-            foreach($source in @( (Join-Path $dir 'desktop.json'), (Join-Path $env:LOCALAPPDATA 'Woodfish\codex-state.json') )){
+            foreach($source in @( (Join-Path $dir 'desktop.json'), (Join-Path $env:LOCALAPPDATA 'Woodfish\codex-state.json'), (Join-Path $env:LOCALAPPDATA 'CodexDreamSkin\state.json') )){
                 if(![IO.File]::Exists($source)){continue}
                 try{
                     $s=Get-Content -Raw -LiteralPath $source|ConvertFrom-Json
                     $listener=Get-NetTCPConnection -LocalAddress '127.0.0.1' -LocalPort $s.port -State Listen -ErrorAction Stop
-                    if($running.Id -contains $listener.OwningProcess){Start-Process -FilePath $exe;return}
+                    if($running.Id -contains $listener.OwningProcess){Start-Process -FilePath $exe -WindowStyle Normal;return}
                 }catch{}
             }
             throw 'Please fully quit Codex (including its tray icon), then open Codex Capsule from Start.'
