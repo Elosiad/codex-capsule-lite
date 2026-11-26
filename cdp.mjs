@@ -1,15 +1,20 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-async function readPages(file,own) {
+async function readPages(file,mode) {
   const state = JSON.parse(await fs.readFile(file,'utf8'));
   if (!Number.isInteger(state.port) || state.port < 1 || state.port > 65535) throw Error('Invalid local renderer port');
   const endpoint = new URL('http://127.0.0.1:'+state.port);
-  if(own){
+  if(mode==='own'){
     if(!Number.isInteger(state.pid)||state.pid<=0||!/^\/devtools\/browser\/[a-f0-9-]+$/.test(state.browserPath))return [];
     process.kill(state.pid,0);
     const v=await fetch(new URL('/json/version',endpoint),{signal:AbortSignal.timeout(1500),redirect:'error'});
     if((await v.json()).webSocketDebuggerUrl!=='ws://'+endpoint.host+state.browserPath)return [];
+  }else if(mode==='dreamskin'){
+    if(!Number.isInteger(state.codexPid)||state.codexPid<=0||!/^[a-f0-9-]+$/i.test(state.browserId||''))return [];
+    process.kill(state.codexPid,0);
+    const v=await fetch(new URL('/json/version',endpoint),{signal:AbortSignal.timeout(1500),redirect:'error'});
+    if((await v.json()).webSocketDebuggerUrl!==`ws://${endpoint.host}/devtools/browser/${state.browserId}`)return [];
   }
   const response = await fetch(new URL('/json/list',endpoint), {signal:AbortSignal.timeout(2000),redirect:'error'});
   const list=await response.json();
@@ -21,9 +26,11 @@ async function readPages(file,own) {
 }
 
 export async function pages(base=process.env.LOCALAPPDATA){
-  const own=await readPages(path.join(base,'CodexCapsule','desktop.json'),true).catch(()=>[]);
+  const own=await readPages(path.join(base,'CodexCapsule','desktop.json'),'own').catch(()=>[]);
   if(own.length)return own;
-  return readPages(path.join(base,'Woodfish','codex-state.json'),false).catch(()=>[]);
+  const woodfish=await readPages(path.join(base,'Woodfish','codex-state.json'),'woodfish').catch(()=>[]);
+  if(woodfish.length)return woodfish;
+  return readPages(path.join(base,'CodexDreamSkin','state.json'),'dreamskin').catch(()=>[]);
 }
 
 export async function connect(page) {
