@@ -1,97 +1,66 @@
-# Codex Capsule
+# Codex Capsule Lite
 
-Windows 版 Codex 桌面端的输入框状态栏。三个圆角胶囊放在输入框内部，与权限按钮、模型选择器和发送按钮同一行。将指针移到胶囊上可查看明细，点击可固定，再点一次或按 Esc 收起。
+English | [简体中文](README.zh-CN.md)
 
-聊天中出现提问卡时，卡片在输入框上方展开。下方输入框保持普通聊天时的高度与间距，文字行和工具栏各占一行。
+A minimalist flat-bar UI & reliability fork of [siwangchenfu/Codex-Capsule](https://github.com/siwangchenfu/Codex-Capsule) for the official Windows Codex Desktop app (`ChatGPT.exe`).
 
-**让 Codex 帮你安装**　把下面这句话发给能在你电脑上运行 PowerShell 的 Codex：
+It keeps the upstream local telemetry engine (accurate streaming & settled `tok/s` excluding tool wait time, subagent combined throughput, `TTFT`, context composition, and 5h / weekly account quotas) while redesigning the UI into a borderless inline bottom strip with compact English popovers.
 
-> 请帮我在这台 Windows 电脑上安装或更新 Codex Capsule：https://github.com/siwangchenfu/Codex-Capsule 。先检查 Windows 官方 Codex 桌面端和 Node.js 22.13+，按 README 启用跟随原图标启动，再打开一个已有聊天，确认输入框里能看到胶囊。
+![Codex Capsule Lite Preview](assets/preview.png)
 
-安装器会启动本地组件并添加当前用户的登录启动项。龙娘是可选组件。
+## What's Changed in Lite
 
-| 胶囊 | 数据与含义 |
-| --- | --- |
-| 速度 · 首次响应 | 正文输出时约每 3 秒采样。生成命令或补丁时，胶囊按相同频率刷新。底栏的「响应」是从发出消息到第一段可见思考摘要或助手正文（含进度回复）的用时。 |
-| 上下文 | 展示缓存命中率、已用百分比和已用 / 总容量。读取构成时，紧凑面板用蓝条表示总占用。数据就绪后，进度条的已用部分按类别分色，右侧空白表示剩余容量。下方图例用同色竖线标出各类占已用部分的百分比和估算 Token 数（1K = 1,000 tokens）。图例按两列对齐，窄窗口自动换成单列。 |
-| 剩余额度 | 面板按行显示额度窗口、剩余百分比、圆环、距重置还有多久。将指针移到倒计时上可看具体重置时间。Plus 有记录时显示「5h额度」「周额度」，Pro 显示「周额度」。Codex 返回有效额外余额时显示「余额」和服务提供的数字、单位。 |
-| 请求异常（按需出现） | 点击或悬停可看中文原因、重试阶段和已识别的技术信息。连接中断、超时、模型繁忙、请求受限和明确的额度耗尽分别显示。普通 HTTP 429 只标为请求受限。 |
+- **Minimalist Flat Inline Strip**: Removed pill borders and heavy backgrounds. Displays `[db] Context% • tok/s` alongside compact `5h%` and `Weekly%` progress rings cleanly inside the composer footer.
+- **Compact Popover Redesign & Full English UI**:
+  - **Context**: `Cache` hit rate, `used / max`, a sleek 5px segmented progress bar, aligned 2-column short labels with right-aligned percentages, media count shown only when present, and remaining capacity without verbose tokenizer notes.
+  - **Speed & TTFT**: Stripped explanatory paragraphs and large headers, surfacing `Speed`, `TTFT`, `Output`, and turn token/duration stats at a glance.
+  - **Account Quota**: Replaced circular rings inside the popover with compact 4-column horizontal progress bars (`5 Hours` / `Weekly`, percentage, pill bar, reset countdown) and a low-quota alert dot (`<= 10%`).
+  - **Request Errors**: Localized status badges and failure explanations in English.
+- **Launcher & DOM Reliability Fixes**:
+  - Added `-WindowStyle Normal` to `Start-Process` calls in `start-codex.ps1` so launching from a hidden shortcut or background watcher never hides `ChatGPT.exe` (`MainWindowHandle = 0`) or locks out re-opening the window.
+  - Updated `renderer.js` to target only `[data-composer-footer-responsive]` containers that actually contain `[data-composer-leading-controls]`, preventing missed mounts when the top editor utility toolbar is open.
+  - Added `CodexDreamSkin/state.json` loopback CDP discovery fallback in `cdp.mjs`.
 
-胶囊读取聊天事件，并核对本机重试日志中的聊天和轮次。即使聊天页面没有报错，胶囊也可能显示一次后台重试。日志提供重试次数和等待时间时，面板会一并显示。收到新的助手回复或进入下一轮后，重试提示会清除。
+## Quick Install (Windows)
 
-如果日志明确记录 WebSocket 连接达到 60 分钟时限，并表明 Codex 会重试，面板显示「连接已满 60 分钟，Codex 正在自动重连」。最终失败时，面板显示连接时限和「本次请求报错」。
+**Requirements**: Official Windows Codex Desktop (`OpenAI.Codex`), Node.js 22.13+ (tested on Node.js 24).
 
-对于带有通用断连前缀的日志，胶囊优先显示能识别的具体原因，例如 HTTP 502/504 服务端错误、连接被拒绝或域名解析失败。只有通用断连信息可识别时，才显示「具体断点未知」。胶囊解析完整的重试记录，面板只展示识别出的错误短语或状态码。
+**Option 1 — Ask Codex to install it for you**:
 
-在「输出与首次响应」面板中：
+> Help me install or update Codex Capsule Lite on this Windows machine from https://github.com/Elosiad/codex-capsule-lite . Check Windows Codex Desktop and Node.js 22.13+, run `.\install.ps1 -FollowCodex`, and verify the inline status strip appears in the composer bar.
 
-- **正文速度**按近 3 秒新增的可见文字估算。正文片段结束后，改用日志记录的 Token 数和生成耗时计算该片段的平均速度。
-- **工具参数速度**适用于模型生成的命令和补丁。读到工具开始记录时先显示已用时间；完整参数写入日志后，显示最近一次工具输入的估算 Token 数和平均生成速度（`≈`）。计时在参数写完时截止，命令执行时间和终端输出均不计入。
-- **首次响应**在出现非空的可见思考摘要或助手正文时计时，单独的「正在思考」状态不触发。界面收到摘要增量时采用其到达时间；回看历史记录时，按首段摘要的起始时间估算并标记 `≈`。缺少可见文字时间时，面板会注明采用了 Codex 记录的首 Token 耗时。
-- **本轮累计输出**汇总主对话及归属本轮的子代理已记录的输出 Token，包含进度回复、最终回复、模型生成的工具调用和计入输出的推理。下一轮从头统计。
-- **本轮合计均速**在读到子代理用量后显示，底栏标为「合计」。计算公式是 **（主对话输出 Token + 本轮各子代理输出 Token）÷ 本轮实际经过的秒数**。计时从主对话本轮开始，包含等待工具的时间。运行中算到当前采样时刻，结束后取主对话结束和子代理最后一笔用量记录中较晚的时刻。
+**Option 2 — Manual PowerShell install**:
 
-例如，主对话输出 100 个 Token，两个子代理各输出 200 个，整轮经过 10 秒，合计均速就是 **50 tok/s**。两个子代理并行工作时，这 10 秒只计一次。面板约每 3 秒刷新，子代理分批写入用量后，累计数也会分批增加。子代理按主对话轮次 ID 归账，同一个子代理被再次调用时只计入归属本轮的输出。「首次响应」仍按主对话计时。
-
-速度胶囊在底栏用 `tok/s` 表示每秒生成的 Token 数，详情面板使用完整单位 `tokens/秒`。速度点的颜色区分速度档位，上下文圆环显示占比。报错提示出现时，四个胶囊会收紧内边距。窗口进一步收窄时，胶囊行可横向滚动，也可用 Tab 依次聚焦。
-
-## 安装
-
-适用于 Windows 上的本地 Codex 桌面聊天。独立模式适配当前用户安装的官方 Windows 应用包，需要可从 PowerShell 运行的 Node.js 22.13+。Woodfish 可选。实测环境为 Codex 26.1117.4957.0、Woodfish 8.1.5 和 Node.js 24。龙娘是可选的额度快照来源。[Woodfish 项目](https://github.com/woodfishhhh/Woodfish-Theme) · [龙娘项目](https://github.com/InhamiRei/Codex-DragonGirl)
-
-从本仓库下载并解压源码，在该目录打开 PowerShell，运行：
+Download or clone this repository, then run in PowerShell from the repo directory:
 
 ```powershell
 .\install.ps1 -FollowCodex
 ```
 
-安装器将程序放入当前用户的 `%LOCALAPPDATA%\CodexCapsule`，立即启动，并在 Windows 启动文件夹添加 `Codex Capsule.lnk`。背景信息窗口可在 Codex 设置中自行开关。更新时从新版源码目录再次运行安装脚本。
+Files are installed to `%LOCALAPPDATA%\CodexCapsule`, launched immediately, and registered in your Windows Startup folder (`Codex Capsule.lnk`).
 
-**跟随原图标启动**　新安装默认启用。用平常的 ChatGPT 或 Codex 图标打开桌面应用即可。独立模式会把刚启动的普通桌面进程重开一次，启用仅限本机的连接。若 Woodfish 自动恢复已运行，由它负责启动，胶囊复用连接。安装时已使用一段时间的聊天窗口会留到下次启动再接入。
-
-更新时运行 `.\install.ps1` 会保留原启动方式。`-FollowCodex` 可为旧安装启用跟随；`-ManualStart` 可改回手动模式，保存工作并完全退出桌面端（包括托盘），再从开始菜单的 **Codex Capsule** 打开。两种模式都支持这个备用入口。
-
-卸载：
+- Update: pull/download the latest files and run `.\install.ps1` again (preserves your launch mode).
+- Manual launch mode (if you prefer not to auto-restart plain Codex launches): run `.\install.ps1 -ManualStart`, then start Codex from the **Codex Capsule** Start Menu shortcut.
+- Uninstall:
 
 ```powershell
 & "$env:LOCALAPPDATA\CodexCapsule\uninstall.ps1"
 ```
 
-## 运行方式
+## How It Works & Privacy
 
-独立启动器从官方应用包清单找到桌面入口，仅为此次启动的 Codex 启用随机回环调试端口。它核对监听进程，后台组件核对浏览器会话标识，再挂载到 Codex 输入框。兼容模式也可复用现有 Woodfish 回环连接。同一台电脑上有访问权限的进程可能通过这个端口查看或操作界面。该连接具备操作本地应用界面的能力。Capsule 只连接本机的 Codex 页面，运行期间只传递当前界面所需的统计字段，不向外部服务上传数据。
+- **Local Loopback Only**: The launcher opens Codex with `--remote-debugging-address=127.0.0.1 --remote-debugging-port=0` (or reuses an existing local `Woodfish` / `CodexDreamSkin` loopback endpoint). Any local process under the same Windows user can access that loopback port, and Capsule uses it strictly to inject and update the bottom-bar widget.
+- **Read-Only Telemetry**: Reads local SQLite and JSONL logs under `CODEX_HOME` (`~/.codex` by default) to compute token throughput, context composition, and quota windows. **No data is uploaded externally.**
+- **Troubleshooting**: Check `%LOCALAPPDATA%\CodexCapsule\status.json` (`active` when attached to a visible window, `waiting` when idle or minimized).
 
-程序读取 `CODEX_HOME`（默认为 `~/.codex`）中的 SQLite 索引和当前聊天的 JSONL 事件。以可见输入框的聊天 ID 定位文件，写入显示前再次核对 ID，切换聊天时清空旧读数。首次读取从日志尾部开始，之后只处理新增字节。较旧的日志若缺少所需字段，或记录超出读取范围，对应位置显示「—」。
-
-剩余额度取当前聊天记载的 Codex 账户窗口；安装龙娘时，还会比较同一数据目录的账户快照，优先采用采样时间较新的记录。额度属于账户，切换同一账户的聊天时可以相同。可在明细面板查看时间，判断快照新旧。
-
-如果界面未出现，可查看 `%LOCALAPPDATA%\CodexCapsule\status.json`。正常附着时为 `active`，等待可用窗口时为 `waiting`。独立跟随仅处理当前用户在本次会话中新开的普通桌面进程，带文件、深层链接或自定义参数的启动会保持原样。如果应用把关闭请求转为最小化到托盘，可完全退出后从备用入口打开。桌面端更新可能改变 DOM 属性或本地日志字段，遇到这种情况需要重新验证适配。
-
-内容构成只在展开上下文面板时按需计算。胶囊使用随附的 gpt-tokenizer 4.1.2（o200k_base）在本机估算可识别文字的 Token 数。已用量高于文字估算总和时，差额显示为「未归类」，其中可能包含图片、加密内容和估算误差。文字估算超过已用量时，各色段按比例缩放。「当前记录图片」统计最近一次压缩保留的图片条目和随后新增的图片，压缩后张数可能减少。分词器的 MIT 和 Unicode 许可随 tokenizer.cjs 附带。
-
-## 更新说明
-
-### 2026-11-23 · 分段日志识别与子代理合计
-
-- 修复长聊天切换到带分段编号的新日志后，速度、首次响应和累计输出缺失或停在旧值的问题。胶囊会重新核对当前聊天的日志路径并跟随切换。
-- 有子代理用量时，速度面板显示本轮合计均速、主对话输出和子代理输出小计。没有子代理用量时，继续显示正文或工具参数速度。
-
-### 2026-11-23 · 改善与 Woodfish 同时使用时的输入响应
-
-在长聊天里边接收回复边打字时，底栏现在根据已知的报错状态直接切换按钮间距，省去原先用 CSS `:has()` 从子按钮反查状态的步骤。报错胶囊出现时四个按钮会收紧间距，提示清除后恢复。
-
-在一台运行 Codex 26.1117.4957.0 和 Woodfish 8.2.2 的 Windows 电脑上，每轮模拟 200 次按键。回切旧规则复测时，有 7 次按键等待超过 50 毫秒；安装修复后复测为 0 次，按键派发延迟 P95 从 16.7 降至 5.2 毫秒。数据来自同一窗口的单机对照。
-
-## 验证
-
-- 在 Windows 实机切换两个上下文占用不同的已有聊天，按 A → B → A 返回。两边读数分别与各自日志一致，B 页拒绝 A 的迟到结果。
-- 在常规宽度和 540 像素输入框宽度检查胶囊位置、权限按钮和模型选择器。实测 Woodfish 的输入光标、聚焦光晕、原生「添加文件」提示框及胶囊自己的详情面板。
-- Pro 的显示在实机核对。Plus 的双窗口、缺失窗口和到期窗口使用构造数据测试。速度按正文或工具输入统计，首次响应按聊天轮次统计。
+## Verification
 
 ```powershell
 node --test test.mjs
-# 以下测试会在两个已存在且有用量记录的聊天间切换，结束后回到原聊天。
-node verify-live.mjs
+node --check renderer.js
 ```
 
-桌面胶囊的交互参考了 [agy-capsule](https://github.com/Lumidarin/agy-capsule)，紧凑布局参考了 [agy-capsule-cli](https://github.com/Lumidarin/agy-capsule-cli)。本项目使用 Codex 自身的数据格式，是个人维护的本地扩展。
+## Upstream & License Note
+
+- Upstream project: [siwangchenfu/Codex-Capsule](https://github.com/siwangchenfu/Codex-Capsule) (the upstream repository does not include a repository-wide `LICENSE` file).
+- Bundled tokenizer: `tokenizer.cjs` (`gpt-tokenizer` 4.1.2) includes its original MIT / Unicode license notices.
